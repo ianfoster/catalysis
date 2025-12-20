@@ -5,6 +5,7 @@ import logging
 import os
 import json
 from typing import Optional
+from pathlib import Path
 
 from academy.exchange import LocalExchangeFactory
 from academy.logging import init_logging
@@ -85,7 +86,10 @@ async def main() -> int:
             "final_answer": final_answer,
             "decision": decision,
         }
-        
+
+        Path("data").mkdir(exist_ok=True)
+        with open("data/runs.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
         print(json.dumps(record, indent=2))
         
     return 0

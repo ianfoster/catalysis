@@ -17,7 +17,7 @@ from langgraph.graph import StateGraph, END
 from orchestration.characterizers import CHARACTERIZERS
 from orchestration.ids import candidate_id
 from orchestration.scoring import score_candidate
-
+from orchestration.executors import LocalExecutor
 
 def choose_characterizers(candidate: dict, history_for_candidate: Dict[str, Any]) -> List[str]:
     """
@@ -197,124 +197,74 @@ def make_evaluate_candidates(ctx: dict):
         if "char_history" not in state or state["char_history"] is None:
             state["char_history"] = {}
 
+        executor = GCExecutor(ctx) if ctx.get("submit_characterization") else LocalExecutor(ctx)
+
         char_events: List[dict] = []
         evals: List[dict] = []
 
+        # Evaluate each candidate
         for c in state["candidates"]:
             ck = candidate_id(c)
             state["char_history"].setdefault(ck, {})
             h = state["char_history"][ck]
 
-            # Decide what to run next for this candidate
+            # Decide which characterizers to run next
             to_run = choose_characterizers(c, h)
 
-            # Execute selected characterizers
+            # Execute characterizers via the executor (centralizes tool calls, caching, error handling)
             for char in to_run:
                 ts = time.time()
+                res = await executor.run(char, c, h)
 
-                if char == "fast_surrogate":
-                    cache_key = None
-                    cached = None
-                    if "cache_key" in ctx and "cache_get" in ctx:
-                        cache_key = ctx["cache_key"](c, "fast_surrogate")
-                        cached = ctx["cache_get"](cache_key)
+                # Update history
+                if res.status in ("SUCCEEDED", "CACHED"):
+                    h[char] = res.result
+                else:
+                    # Keep a trace that it was attempted/skipped/failed
+                    h[char] = {"status": res.status, **res.result}
 
-                    if cached is not None:
-                        # cached value should match what we store (see below)
-                        h["fast_surrogate"] = cached
-                        char_events.append({
-                            "run_id": state["run_id"],
-                            "iteration": state["iteration"] + 1,
-                            "candidate_key": ck,
-                            "candidate": c,
-                            "characterizer": "fast_surrogate",
-                            "status": "CACHED",
-                            "result": cached,
-                            "ts": ts,
-                        })
-                    else:
-                        enc = await ctx["encode_catalyst"](support=c["support"], metals=c["metals"])
-                        perf = await ctx["predict_performance"](feature_vector=enc["feature_vector"])
-                        cost = await ctx["estimate_catalyst_cost"](support=c["support"], metals=c["metals"])
-
-                        computed = {"encoding": enc, "performance": perf, "catalyst_cost": cost}
-                        h["fast_surrogate"] = computed
-
-                        if cache_key is not None and "cache_set" in ctx:
-                            ctx["cache_set"](cache_key, computed)
-
-                        char_events.append({
-                            "run_id": state["run_id"],
-                            "iteration": state["iteration"] + 1,
-                            "candidate_key": ck,
-                            "candidate": c,
-                            "characterizer": "fast_surrogate",
-                            "status": "SUCCEEDED",
-                            "result": computed,
-                            "ts": ts,
-                        })
-
-                elif char == "microkinetic_lite":
-                    # Only run if tool is available; otherwise mark skipped
-                    if "microkinetic_lite" in ctx:
-                        fs = h.get("fast_surrogate", {})
-                        perf = fs.get("performance", {})
-                        mk = await ctx["microkinetic_lite"](candidate=c, performance=perf)
-                        h["microkinetic_lite"] = mk
-
-                        char_events.append({
-                            "run_id": state["run_id"],
-                            "iteration": state["iteration"] + 1,
-                            "candidate_key": ck,
-                            "candidate": c,
-                            "characterizer": "microkinetic_lite",
-                            "status": "SUCCEEDED",
-                            "result": mk,
-                            "ts": ts,
-                        })
-                    else:
-                        h["microkinetic_lite"] = {"status": "SKIPPED", "reason": "tool not available"}
-                        char_events.append({
-                            "run_id": state["run_id"],
-                            "iteration": state["iteration"] + 1,
-                            "candidate_key": ck,
-                            "candidate": c,
-                            "characterizer": "microkinetic_lite",
-                            "status": "SKIPPED",
-                            "result": h["microkinetic_lite"],
-                            "ts": ts,
-                        })
-
-                elif char == "dft_adsorption":
-                    # Keep placeholder until GC/HPC is wired
-                    h["dft_adsorption"] = {"status": "SKIPPED", "reason": "HPC not wired"}
-                    char_events.append({
+                # Emit candidate-level event record for JSONL logging
+                char_events.append(
+                    {
                         "run_id": state["run_id"],
                         "iteration": state["iteration"] + 1,
-                        "candidate_key": ck,
+                        "candidate_id": ck,
                         "candidate": c,
-                        "characterizer": "dft_adsorption",
-                        "status": "SKIPPED",
-                        "result": h["dft_adsorption"],
+                        "characterizer": char,
+                        "status": res.status,
+                        "result": res.result,
+                        "latency_s": res.latency_s,
                         "ts": ts,
-                    })
+                        "provenance": res.provenance,
+                    }
+                )
 
-            # Build evaluation using accumulated history
+            # Compute score from accumulated history
             score = score_candidate(h)
+
+            # Convenience fields for selection/debugging
+            fs = h.get("fast_surrogate", {})
+            perf = fs.get("performance") if isinstance(fs, dict) else None
+            enc = fs.get("encoding") if isinstance(fs, dict) else None
+            cost = fs.get("catalyst_cost") if isinstance(fs, dict) else None
 
             evals.append(
                 {
                     "candidate": c,
-                    "history": h,  # contains fast_surrogate + any escalations
+                    "candidate_id": ck,
+                    "history": h,
                     "score": score,
-                    # Convenience fields for debugging/selection
-                    "performance": h.get("fast_surrogate", {}).get("performance"),
-                    "encoding": h.get("fast_surrogate", {}).get("encoding"),
-                    "catalyst_cost": h.get("fast_surrogate", {}).get("catalyst_cost"),
+                    "performance": perf,
+                    "encoding": enc,
+                    "catalyst_cost": cost,
                 }
             )
 
-        return {"evaluations": evals, "char_history": state["char_history"]}
+        return {
+            "evaluations": evals,
+            "char_history": state["char_history"],
+            "char_events": char_events,
+        }
 
     return evaluate_candidates
 
