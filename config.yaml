@@ -1,0 +1,17 @@
+run:
+  max_iterations: 3
+  concurrency: 32
+  escalate_k: 5
+  poll_interval: 0.5
+  gc_timeout: 300
+
+paths:
+  out_jsonl: data/runs.jsonl
+  cache_jsonl: data/char_cache.jsonl
+
+globus_compute:
+  enabled: false
+  endpoint_id: null
+  functions:
+    fast_surrogate: null
+    microkinetic_lite: null
