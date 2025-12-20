@@ -7,6 +7,10 @@ import logging
 import os
 from pathlib import Path
 from typing import Optional
+import uuid
+import time
+import random
+import numpy as np
 
 from academy.exchange import LocalExchangeFactory
 from academy.logging import init_logging
@@ -21,15 +25,43 @@ from orchestration.loop import build_loop_graph
 
 logger = logging.getLogger(__name__)
 
+run_id = str(uuid.uuid4())
+logger.info("Run ID: %s", run_id)
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--max-iterations", type=int, default=3)
     p.add_argument("--out", default="data/runs.jsonl")
+    p.add_argument(
+        "-s", "--seed",
+        type=int,
+        default=None,
+        help="Random seed for reproducibility (default: None).",
+    )
+    p.add_argument(
+        "-l", "--log-level",
+        dest="log_level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Logging level (default: %(default)s).",
+    )
     return p.parse_args()
 
 async def main() -> int:
     init_logging(logging.INFO)
     args = parse_args()
+
+    level = getattr(logging, args.log_level.upper(), logging.INFO)
+    init_logging(level)
+
+    # Ensure non-academy loggers also honor the level
+    logging.getLogger().setLevel(level)
+
+    if args.seed is not None:
+        #random.seed(args.seed)
+        np.random.seed(args.seed)
+        logger.info("Random seed set to %d", args.seed)
 
     Path("data").mkdir(exist_ok=True)
 
@@ -53,6 +85,8 @@ async def main() -> int:
         ctx = {
             "encode_catalyst": lambda **kw: call_tool("encode_catalyst", **kw),
             "predict_performance": lambda **kw: call_tool("predict_performance", **kw),
+            "estimate_cost": lambda **kw: call_tool("estimate_cost", **kw),
+            "estimate_catalyst_cost": lambda **kw: call_tool("estimate_catalyst_cost", **kw),
         }
 
         graph = build_loop_graph(ctx)
@@ -67,20 +101,51 @@ async def main() -> int:
         }
 
         # Run the loop
-        result = await graph.ainvoke(state)
+        final_state = None
+
+        async for event in graph.astream(state):
+            # Each event is {node_name: node_output}
+            for node_name, payload in event.items():
+
+                if node_name == "select":
+                    iteration = payload["iteration"]
+                    best = payload["best"]
+        
+                    record = {
+                        "run_id": run_id,
+                        "iteration": iteration,
+                        "candidate_count": len(state["candidates"]),
+                        "best_score": best["score"] if best else None,
+                        "best_candidate": best["candidate"] if best else None,
+                        "performance": best["performance"] if best else None,
+                        "ts": time.time(),
+                    }
+
+                    # Write one JSONL record per iteration
+                    with open(args.out, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(record) + "\n")
+
+                    logger.info(
+                        "Iteration %d | best score %.3f | support=%s",
+                        iteration,
+                        record["best_score"],
+                        record["best_candidate"]["support"] if best else "n/a",
+                    )
+
+                final_state = payload
 
         # Persist the final result record
-        record = {
+        summary = {
+            "run_id": run_id,
             "goal": state["goal"],
-            "max_iterations": args.max_iterations,
-            "final_best": result.get("best"),
-            "final_iteration": result.get("iteration"),
+            "final_iteration": final_state.get("iteration") if final_state else None,
+            "final_best": final_state.get("best") if final_state else None,
         }
 
         with open(args.out, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record) + "\n")
+            f.write(json.dumps(summary) + "\n")
 
-        print(json.dumps(record, indent=2))
+        print(json.dumps(summary, indent=2))
 
     return 0
 
