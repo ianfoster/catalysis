@@ -26,13 +26,24 @@ class GlobusComputeAdapter:
         return self.gc.get_task(task_id)
 
     def try_result(self, task_id: str) -> Dict[str, Any]:
-        t = self.get_task(task_id)
-        status = t.get("status", "UNKNOWN")
-
-        if status == "SUCCEEDED":
-            # result is whatever your function returns (must be serializable)
-            return {"status": "SUCCEEDED", "result": self.gc.get_result(task_id)}
-        if status == "FAILED":
-            return {"status": "FAILED", "error": t.get("exception", "unknown")}
-
-        return {"status": status}
+        t = self.gc.get_task(task_id)
+    
+        # Globus Compute SDK v4 returns "pending": bool and "status": "success"/"failed"/...
+        pending = t.get("pending", None)
+        status_raw = (t.get("status") or "").lower()
+    
+        if pending is False and status_raw in ("success", "succeeded"):
+            # result is already included in get_task() under key "result" in your output
+            return {"status": "SUCCEEDED", "result": t.get("result"), "details": t.get("details")}
+    
+        if pending is False and status_raw in ("failed", "failure", "error"):
+            # Some failures may include error fields in details; keep task payload
+            return {"status": "FAILED", "error": t.get("exception") or t.get("details") or t}
+    
+        # Otherwise, still pending/running
+        # Some deployments may report "active" or similar; keep it as RUNNING if not pending False
+        if pending is True:
+            return {"status": "PENDING"}
+    
+        # Fallback
+        return {"status": status_raw.upper() or "UNKNOWN"}

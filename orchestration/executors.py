@@ -4,7 +4,9 @@ import asyncio
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+import logging
 
+logger = logging.getLogger(__name__)
 
 @dataclass
 class ExecResult:
@@ -149,8 +151,6 @@ class LocalExecutor:
         return {ck: res for ck, res in out_pairs}
 
 
-
-
 class GCExecutor:
     """
     Executes characterizers via Globus Compute using ctx tools:
@@ -214,7 +214,21 @@ class GCExecutor:
             submit = self.ctx["submit_characterization"]
             get = self.ctx["get_characterization"]
 
-            sub = await submit(characterizer=characterizer, payload=payload)
+            try:
+                sub = await submit(characterizer=characterizer, payload=payload)
+            except Exception as e:
+                results[ck] = ExecResult(
+                    characterizer=characterizer,
+                    status="FAILED",
+                    result={
+                        "error": f"submit failed: {repr(e)}",
+                        "task": {"candidate_id": ck},
+                    },
+                    latency_s=time.time() - t0,
+                    provenance={"mode": "globus_compute"},
+                )
+                return
+
             task_id = sub.get("task_id")
             if not task_id:
                 return ExecResult(
@@ -334,6 +348,7 @@ class GCExecutor:
                     return
 
                 pending[ck] = {"task_id": task_id, "meta": sub, "cache_key": cache_key, "candidate": c}
+                logger.info("GC submit | char=%s | candidate_id=%s | task_id=%s", characterizer, ck, task_id)
 
         await asyncio.gather(*[_submit_one(ck, c) for ck, c in candidates])
 
@@ -341,26 +356,79 @@ class GCExecutor:
         async def _poll_until_done() -> None:
             nonlocal results, pending
             start = time.time()
+
+            def _task_info(ck: str, info: Dict[str, Any]) -> Dict[str, Any]:
+                # Consistent provenance/task metadata everywhere
+                return {
+                    "candidate_id": ck,
+                    "task_id": info.get("task_id"),
+                    "submit_meta": info.get("meta", {}),
+                }
+
             while pending:
                 # timeout
                 if timeout and (time.time() - start) > timeout:
+                    logger.warning(
+                        "GC timeout | char=%s | pending=%d | pending_by_candidate=%s",
+                        characterizer,
+                        len(pending),
+                        {ck: info.get("task_id") for ck, info in pending.items()},
+                    )
                     for ck, info in list(pending.items()):
                         results[ck] = ExecResult(
                             characterizer=characterizer,
-                            status="FAILED",
-                            result={"error": f"timeout after {timeout}s", "task": info["meta"]},
+                            status="TIMEOUT",
+                            result={
+                                "error": f"timeout after {timeout}s",
+                                "task": _task_info(ck, info),
+                            },
                             latency_s=time.time() - t0,
-                            provenance={"mode": "globus_compute"},
+                            provenance={
+                                "mode": "globus_compute",
+                                "task": _task_info(ck, info),
+                            },
                         )
                         pending.pop(ck, None)
                     return
 
-                done_keys = []
-                for ck, info in pending.items():
-                    r = await get(task_id=info["task_id"])
+                done_keys: List[str] = []
+                for ck, info in list(pending.items()):
+                    task_id = info.get("task_id")
+                    if not task_id:
+                        results[ck] = ExecResult(
+                            characterizer=characterizer,
+                            status="FAILED",
+                            result={
+                                "error": "missing task_id in pending record",
+                                "task": _task_info(ck, info),
+                            },
+                            latency_s=time.time() - t0,
+                            provenance={
+                                "mode": "globus_compute",
+                                "task": _task_info(ck, info),
+                            },
+                        )
+                        done_keys.append(ck)
+                        continue
+
+                    try:
+                        r = await get(task_id=task_id)
+                    except Exception as e:
+                        # Treat poll failures as transient; keep pending unless you prefer to fail-fast
+                        logger.warning(
+                            "GC poll error | char=%s | candidate_id=%s | task_id=%s | err=%r",
+                            characterizer,
+                            ck,
+                            task_id,
+                            e,
+                        )
+                        continue
+
                     status = r.get("status", "UNKNOWN")
+
                     if status == "SUCCEEDED":
                         computed = r.get("result")
+
                         # cache write
                         if info.get("cache_key") is not None and "cache_set" in self.ctx:
                             self.ctx["cache_set"](info["cache_key"], computed)
@@ -370,7 +438,10 @@ class GCExecutor:
                             status="SUCCEEDED",
                             result=computed,
                             latency_s=time.time() - t0,
-                            provenance={"mode": "globus_compute", "task": info["meta"]},
+                            provenance={
+                                "mode": "globus_compute",
+                                "task": _task_info(ck, info),
+                            },
                         )
                         done_keys.append(ck)
 
@@ -378,9 +449,15 @@ class GCExecutor:
                         results[ck] = ExecResult(
                             characterizer=characterizer,
                             status="FAILED",
-                            result={"error": r.get("error", "unknown"), "task": info["meta"]},
+                            result={
+                                "error": r.get("error", "unknown"),
+                                "task": _task_info(ck, info),
+                            },
                             latency_s=time.time() - t0,
-                            provenance={"mode": "globus_compute"},
+                            provenance={
+                                "mode": "globus_compute",
+                                "task": _task_info(ck, info),
+                            },
                         )
                         done_keys.append(ck)
 
@@ -390,5 +467,25 @@ class GCExecutor:
                 if pending:
                     await asyncio.sleep(self.poll_interval_s)
 
-        await _poll_until_done()
+        try:
+            await _poll_until_done()
+        except asyncio.CancelledError:
+            logger.warning(
+                "GC batch cancelled | char=%s | pending=%d | pending_by_candidate=%s",
+                characterizer,
+                len(pending),
+                {ck: info["task_id"] for ck, info in pending.items()},
+            )
+
+            # Keep whatever results we already have; mark the rest as cancelled
+            for ck, info in list(pending.items()):
+                results[ck] = ExecResult(
+                    characterizer=characterizer,
+                    status="CANCELLED",
+                    result={"error": "cancelled", "task": info.get("meta", {}), "task_id": info.get("task_id")},
+                    latency_s=time.time() - t0,
+                    provenance={"mode": "globus_compute"},
+                )
+            pending.clear()
+
         return results

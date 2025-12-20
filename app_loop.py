@@ -43,6 +43,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--out", default="data/runs.jsonl")
     p.add_argument("--gc-endpoint", default=None, help="Globus Compute endpoint UUID")
     p.add_argument("--gc-func-fast", default=None, help="Function ID for fast characterizer")
+    p.add_argument("--gc-timeout", type=float, default=300.0,
+                   help="Max seconds to wait for GC batch completion (default: %(default)s).")
+    p.add_argument("--poll-interval", type=float, default=0.25,
+                   help="Polling interval for GC task status (default: %(default)s).")
     p.add_argument(
         "--concurrency",
         type=int,
@@ -169,6 +173,8 @@ async def main() -> int:
             "char_history": {},
             "concurrency": args.concurrency,  
             "escalate_k": args.escalate_k, 
+            "gc_timeout": args.gc_timeout,
+            "poll_interval": args.poll_interval,
         }
 
         # Run the loop

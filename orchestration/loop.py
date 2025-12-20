@@ -205,7 +205,9 @@ def make_evaluate_candidates(ctx: dict):
             state["char_history"] = {}
 
         # Switch backends automatically
-        executor = GCExecutor(ctx) if ctx.get("submit_characterization") else LocalExecutor(ctx)
+        executor = GCExecutor(ctx,
+                              poll_interval_s=state.get("poll_interval", 0.25),
+                              timeout_s=state.get("gc_timeout", 300.0)) if ctx.get("submit_characterization") else LocalExecutor(ctx)
         logger.debug("Executor backend: %s", executor.__class__.__name__)
         print(f"Executor backend: {executor.__class__.__name__}")
 
