@@ -7,14 +7,101 @@ from typing import Any, Dict, List, Optional, TypedDict
 import time
 import uuid
 import random
+import asyncio
+
 
 from langgraph.graph import StateGraph, END
+
+from orchestration.characterizers import CHARACTERIZERS
+
+def _candidate_key(c: dict) -> str:
+    """Stable-enough key for now. Replace with a real candidate_id later."""
+    return repr(c)
+
+def choose_characterizers(candidate: dict, history_for_candidate: Dict[str, Any]) -> List[str]:
+    """
+    Decide which characterizers to run for this candidate, given what's already known.
+
+    v1 policy:
+      - always run fast_surrogate first
+      - if promising and still uncertain, escalate to microkinetic_lite
+      - if very promising, escalate to dft_adsorption
+    """
+    if "fast_surrogate" not in history_for_candidate:
+        return ["fast_surrogate"]
+
+    fs = history_for_candidate["fast_surrogate"]
+    sty = float(fs["performance"]["methanol_sty"])
+
+    # Escalation thresholds (tune later)
+    if sty > 5.5 and "microkinetic_lite" not in history_for_candidate:
+        return ["microkinetic_lite"]
+
+    if sty > 6.5 and "dft_adsorption" not in history_for_candidate:
+        return ["dft_adsorption"]
+
+    return []
+
+def score_from_history(history_for_candidate: Dict[str, Any]) -> float:
+    """
+    Compute a score using whatever information we currently have.
+
+    v1: use fast_surrogate metrics + cost penalty, plus small bonuses for extra characterization.
+    """
+    if "fast_surrogate" not in history_for_candidate:
+        return float("-inf")
+
+    fs = history_for_candidate["fast_surrogate"]
+    perf = fs["performance"]
+    cost = fs.get("catalyst_cost", {})
+
+    usd_per_kg = float(cost.get("usd_per_kg", 0.0))
+
+    score = (
+        1.0 * float(perf["methanol_sty"])
+        + 2.0 * float(perf["methanol_selectivity"])
+        + 0.5 * float(perf["co2_conversion"])
+        - 0.5 * float(perf.get("uncertainty", 0.0))
+        - 0.001 * usd_per_kg
+    )
+
+    # Bonus for additional evidence (placeholders for now)
+    if "microkinetic_lite" in history_for_candidate:
+        score += 0.25
+    if "dft_adsorption" in history_for_candidate:
+        score += 0.50
+
+    return score
+
+def choose_characterizers(candidate: dict, history: dict) -> list[str]:
+    """
+    Decide which characterizers to run next for a candidate.
+    """
+    cid = repr(candidate)
+    seen = history.get(cid, {})
+
+    # Always start with cheap
+    if "fast_surrogate" not in seen:
+        return ["fast_surrogate"]
+
+    # Escalate if uncertainty remains and candidate is promising
+    if seen["fast_surrogate"]["methanol_sty"] > 5.5:
+        if "microkinetic_lite" not in seen:
+            return ["microkinetic_lite"]
+
+    # Only escalate to DFT for top-tier
+    if seen["fast_surrogate"]["methanol_sty"] > 6.5:
+        if "dft_adsorption" not in seen:
+            return ["dft_adsorption"]
+
+    return []
 
 logger = logging.getLogger(__name__)
 
 RUN_ID = str(uuid.uuid4())
 
 class LoopState(TypedDict):
+    run_id: str
     goal: str
     candidates: List[dict]
     evaluations: List[dict]
@@ -22,6 +109,7 @@ class LoopState(TypedDict):
     iteration: int
     max_iterations: int
     iteration_record: Optional[dict]
+    char_history: Dict[str, Dict[str, Any]]  # candidate_key -> {characterizer -> result}
 
 def propose_candidates_OLD(_: LoopState) -> Dict[str, Any]:
     candidates = [
@@ -101,27 +189,114 @@ def propose_candidates(state: LoopState) -> Dict[str, Any]:
     best_candidate = state["best"]["candidate"]
     return {"candidates": _neighbors(best_candidate, k=len(seed), step=5.0)}
 
+
 def make_evaluate_candidates(ctx: dict):
     async def evaluate_candidates(state: LoopState) -> Dict[str, Any]:
-        evals: List[dict] = []
-        for c in state["candidates"]:
-            enc = await ctx["encode_catalyst"](support=c["support"], metals=c["metals"])
-            perf = await ctx["predict_performance"](feature_vector=enc["feature_vector"])
-            cost = await ctx["estimate_catalyst_cost"](support=c["support"], metals=c["metals"])
-            usd_per_kg = float(cost["usd_per_kg"])
+        # Ensure history exists
+        if "char_history" not in state or state["char_history"] is None:
+            state["char_history"] = {}
 
-            score = (
-                1.0 * float(perf["methanol_sty"])
-                + 2.0 * float(perf["methanol_selectivity"])
-                + 0.5 * float(perf["co2_conversion"])
-                - 0.5 * float(perf.get("uncertainty", 0.0))
-                - 0.001 * usd_per_kg   # small penalty
+        char_events: List[dict] = []
+        evals: List[dict] = []
+
+        for c in state["candidates"]:
+            ck = _candidate_key(c)
+            state["char_history"].setdefault(ck, {})
+            h = state["char_history"][ck]
+
+            # Decide what to run next for this candidate
+            to_run = choose_characterizers(c, h)
+
+            # Execute selected characterizers
+            for char in to_run:
+                ts = time.time()
+
+                if char == "fast_surrogate":
+                    enc = await ctx["encode_catalyst"](support=c["support"], metals=c["metals"])
+                    perf = await ctx["predict_performance"](feature_vector=enc["feature_vector"])
+                    cost = await ctx["estimate_catalyst_cost"](support=c["support"], metals=c["metals"])
+
+                    h["fast_surrogate"] = {
+                        "encoding": enc,
+                        "performance": perf,
+                        "catalyst_cost": cost,
+                    }
+
+                    char_events.append({
+                        "run_id": state["run_id"],
+                        "iteration": state["iteration"] + 1,
+                        "candidate_key": ck,
+                        "candidate": c,
+                        "characterizer": "fast_surrogate",
+                        "status": "SUCCEEDED",
+                        "result": h["fast_surrogate"],
+                        "ts": ts,
+                    })
+
+                elif char == "microkinetic_lite":
+                    # Only run if tool is available; otherwise mark skipped
+                    if "microkinetic_lite" in ctx:
+                        fs = h.get("fast_surrogate", {})
+                        perf = fs.get("performance", {})
+                        mk = await ctx["microkinetic_lite"](candidate=c, performance=perf)
+                        h["microkinetic_lite"] = mk
+
+                        char_events.append({
+                            "run_id": state["run_id"],
+                            "iteration": state["iteration"] + 1,
+                            "candidate_key": ck,
+                            "candidate": c,
+                            "characterizer": "microkinetic_lite",
+                            "status": "SUCCEEDED",
+                            "result": mk,
+                            "ts": ts,
+                        })
+                    else:
+                        h["microkinetic_lite"] = {"status": "SKIPPED", "reason": "tool not available"}
+                        char_events.append({
+                            "run_id": state["run_id"],
+                            "iteration": state["iteration"] + 1,
+                            "candidate_key": ck,
+                            "candidate": c,
+                            "characterizer": "microkinetic_lite",
+                            "status": "SKIPPED",
+                            "result": h["microkinetic_lite"],
+                            "ts": ts,
+                        })
+
+                elif char == "dft_adsorption":
+                    # Keep placeholder until GC/HPC is wired
+                    h["dft_adsorption"] = {"status": "SKIPPED", "reason": "HPC not wired"}
+                    char_events.append({
+                        "run_id": state["run_id"],
+                        "iteration": state["iteration"] + 1,
+                        "candidate_key": ck,
+                        "candidate": c,
+                        "characterizer": "dft_adsorption",
+                        "status": "SKIPPED",
+                        "result": h["dft_adsorption"],
+                        "ts": ts,
+                    })
+
+            # Build evaluation using accumulated history
+            score = score_from_history(h)
+
+            evals.append(
+                {
+                    "candidate": c,
+                    "history": h,  # contains fast_surrogate + any escalations
+                    "score": score,
+                    # Convenience fields for debugging/selection
+                    "performance": h.get("fast_surrogate", {}).get("performance"),
+                    "encoding": h.get("fast_surrogate", {}).get("encoding"),
+                    "catalyst_cost": h.get("fast_surrogate", {}).get("catalyst_cost"),
+                }
             )
 
-            evals.append({"candidate": c, "encoding": enc, "performance": perf, "score": score})
+        return {"evaluations": evals, "char_history": state["char_history"]}
 
-        return {"evaluations": evals}
     return evaluate_candidates
+
 
 def select_best(state: LoopState) -> Dict[str, Any]:
     best = max(state["evaluations"], key=lambda x: x["score"]) if state["evaluations"] else None

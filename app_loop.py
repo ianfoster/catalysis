@@ -20,6 +20,11 @@ from skills.catalyst import CatalystSkill
 from skills.performance import PerformanceSkill
 from skills.economics import EconomicsSkill  # optional if you want later
 
+from skills.hpc_characterizer import HPCCharacterizerSkill
+from skills.microkinetic import MicrokineticSkill
+from orchestration.tools import make_microkinetic_tools
+from orchestration.tools import make_hpc_tools
+
 from orchestration.tools import make_catalyst_tools, make_performance_tools, make_economics_tools
 from orchestration.loop import build_loop_graph
 
@@ -33,6 +38,8 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--max-iterations", type=int, default=3)
     p.add_argument("--out", default="data/runs.jsonl")
+    p.add_argument("--gc-endpoint", default=None, help="Globus Compute endpoint UUID")
+    p.add_argument("--gc-func-fast", default=None, help="Function ID for fast characterizer")
     p.add_argument(
         "-s", "--seed",
         type=int,
@@ -69,11 +76,30 @@ async def main() -> int:
         cat = await manager.launch(CatalystSkill)
         perf = await manager.launch(PerformanceSkill)
         econ = await manager.launch(EconomicsSkill)  # not used in v1 score, but ready
+        mk = await manager.launch(MicrokineticSkill)
+        use_gc = args.gc_endpoint is not None and args.gc_func_fast is not None
+        if use_gc:
+            logger.info("Globus Compute ENABLED (endpoint=%s)", args.gc_endpoint)
+        else:
+            logger.info("Globus Compute DISABLED (local-only mode)")
+
+        if use_gc:
+            hpc = await manager.launch(
+                HPCCharacterizerSkill,
+                kwargs={
+                    "endpoint_id": args.gc_endpoint,
+                    "function_map": {
+                        "fast_surrogate": args.gc_func_fast,
+                    },
+                },
+            )
 
         tools = []
         tools.extend(make_catalyst_tools(cat))
         tools.extend(make_performance_tools(perf))
         tools.extend(make_economics_tools(econ))
+        if use_gc: tools.extend(make_hpc_tools(hpc))
+        tools.extend(make_microkinetic_tools(mk)) 
 
         # Build a callable context from tools by name
         tool_by_name = {t.name: t for t in tools}
@@ -87,17 +113,20 @@ async def main() -> int:
             "predict_performance": lambda **kw: call_tool("predict_performance", **kw),
             "estimate_cost": lambda **kw: call_tool("estimate_cost", **kw),
             "estimate_catalyst_cost": lambda **kw: call_tool("estimate_catalyst_cost", **kw),
+            "microkinetic_lite": lambda **kw: call_tool("microkinetic_lite", **kw),
         }
 
         graph = build_loop_graph(ctx)
 
         state = {
+            "run_id": run_id,
             "goal": "CO2 + H2 -> methanol catalyst optimization",
             "candidates": [],
             "evaluations": [],
             "best": None,
             "iteration": 0,
             "max_iterations": args.max_iterations,
+            "char_history": {},
         }
 
         # Run the loop
@@ -131,7 +160,11 @@ async def main() -> int:
                         record["best_score"],
                         record["best_candidate"]["support"] if best else "n/a",
                     )
-
+                if node_name == "evaluate" and "char_events" in payload:
+                    for rec in payload["char_events"]:
+                        with open(args.out, "a", encoding="utf-8") as f:
+                            f.write(json.dumps(rec) + "\n")
+        
                 final_state = payload
 
         # Persist the final result record
