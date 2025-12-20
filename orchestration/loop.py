@@ -191,7 +191,125 @@ def propose_candidates(state: LoopState) -> Dict[str, Any]:
     return {"candidates": _neighbors(best_candidate, k=len(seed), step=5.0)}
 
 
+import time
+from orchestration.executors import LocalExecutor, GCExecutor  # ensure GCExecutor import exists
+from orchestration.scoring import score_candidate
+from orchestration.ids import candidate_id
+
+
 def make_evaluate_candidates(ctx: dict):
+    async def evaluate_candidates(state: LoopState) -> Dict[str, Any]:
+        if "char_history" not in state or state["char_history"] is None:
+            state["char_history"] = {}
+
+        # Switch backends automatically
+        executor = GCExecutor(ctx) if ctx.get("submit_characterization") else LocalExecutor(ctx)
+
+        char_events: List[dict] = []
+        evals: List[dict] = []
+
+        # Prepare candidate pairs for stable mapping
+        cand_pairs = []
+        for c in state["candidates"]:
+            ck = candidate_id(c)
+            state["char_history"].setdefault(ck, {})
+            cand_pairs.append((ck, c))
+
+        histories = state["char_history"]
+
+        # 1) Batch run fast_surrogate for all candidates
+        batch_results = await executor.run_batch(
+            "fast_surrogate",
+            cand_pairs,
+            histories,
+            concurrency=32,   # tune later / make CLI option
+        )
+
+        # Update history + emit events for fast_surrogate
+        for ck, c in cand_pairs:
+            h = histories[ck]
+            res = batch_results[ck]
+
+            if res.status in ("SUCCEEDED", "CACHED"):
+                h["fast_surrogate"] = res.result
+            else:
+                h["fast_surrogate"] = {"status": res.status, **res.result}
+
+            char_events.append(
+                {
+                    "run_id": state["run_id"],
+                    "iteration": state["iteration"] + 1,
+                    "candidate_id": ck,
+                    "candidate": c,
+                    "characterizer": "fast_surrogate",
+                    "status": res.status,
+                    "result": res.result,
+                    "latency_s": res.latency_s,
+                    "ts": time.time(),
+                    "provenance": res.provenance,
+                }
+            )
+
+        # 2) Optional escalation per candidate (microkinetic_lite, dft_adsorption, etc.)
+        for ck, c in cand_pairs:
+            h = histories[ck]
+            to_run = choose_characterizers(c, h)
+
+            # We already ran fast_surrogate in batch; remove it if present
+            to_run = [ch for ch in to_run if ch != "fast_surrogate"]
+
+            for ch in to_run:
+                ts = time.time()
+                res = await executor.run(ch, c, h)
+
+                if res.status in ("SUCCEEDED", "CACHED"):
+                    h[ch] = res.result
+                else:
+                    h[ch] = {"status": res.status, **res.result}
+
+                char_events.append(
+                    {
+                        "run_id": state["run_id"],
+                        "iteration": state["iteration"] + 1,
+                        "candidate_id": ck,
+                        "candidate": c,
+                        "characterizer": ch,
+                        "status": res.status,
+                        "result": res.result,
+                        "latency_s": res.latency_s,
+                        "ts": ts,
+                        "provenance": res.provenance,
+                    }
+                )
+
+        # 3) Build evaluations
+        for ck, c in cand_pairs:
+            h = histories[ck]
+            score = score_candidate(h)
+
+            fs = h.get("fast_surrogate", {})
+            perf = fs.get("performance") if isinstance(fs, dict) else None
+            enc = fs.get("encoding") if isinstance(fs, dict) else None
+            cost = fs.get("catalyst_cost") if isinstance(fs, dict) else None
+
+            evals.append(
+                {
+                    "candidate": c,
+                    "candidate_id": ck,
+                    "history": h,
+                    "score": score,
+                    "performance": perf,
+                    "encoding": enc,
+                    "catalyst_cost": cost,
+                }
+            )
+
+        return {"evaluations": evals, "char_history": histories, "char_events": char_events}
+
+    return evaluate_candidates
+
+
+def make_evaluate_candidates_OLD(ctx: dict):
     async def evaluate_candidates(state: LoopState) -> Dict[str, Any]:
         # Ensure history exists
         if "char_history" not in state or state["char_history"] is None:
