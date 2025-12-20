@@ -1,0 +1,26 @@
+# ---- Core Python / async utilities ----
+aiohttp>=3.9
+pydantic>=2.6
+
+# ---- Scientific stack ----
+numpy>=1.26
+
+# ---- LangChain / LangGraph ----
+langchain>=0.2
+langgraph>=0.1
+langchain-core>=0.2
+
+# ---- OpenAI-compatible chat models (if used anywhere) ----
+langchain-openai>=0.1
+
+# ---- Academy (agent runtime / execution substrate) ----
+academy-py>=0.3
+
+# ---- Globus Compute (client-side SDK) ----
+globus-compute-sdk>=4.3.0
+
+# ---- Serialization (explicit, to match endpoint) ----
+dill>=0.3.9
+
+# ---- CLI / logging helpers ----
+rich>=13.7

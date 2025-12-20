@@ -112,6 +112,7 @@ class LoopState(TypedDict):
     iteration_record: Optional[dict]
     char_history: Dict[str, Dict[str, Any]]  # candidate_key -> {characterizer -> result}
     concurrency: int
+    escalate_k: int
 
 def propose_candidates_OLD(_: LoopState) -> Dict[str, Any]:
     candidates = [
@@ -205,6 +206,8 @@ def make_evaluate_candidates(ctx: dict):
 
         # Switch backends automatically
         executor = GCExecutor(ctx) if ctx.get("submit_characterization") else LocalExecutor(ctx)
+        logger.debug("Executor backend: %s", executor.__class__.__name__)
+        print(f"Executor backend: {executor.__class__.__name__}")
 
         char_events: List[dict] = []
         evals: List[dict] = []
@@ -224,6 +227,26 @@ def make_evaluate_candidates(ctx: dict):
             cand_pairs,
             histories,
             concurrency=state.get("concurrency", 32),
+        )
+
+        # Rank candidates by current score (using only available history)
+        ranked = []
+        for ck, c in cand_pairs:
+            h = histories[ck]
+            ranked.append((ck, c, score_candidate(h)))
+
+        # Sort descending by score
+        ranked.sort(key=lambda x: x[2], reverse=True)
+
+        # Determine which candidate_ids are eligible for escalation
+        k = max(0, int(state.get("escalate_k", 0)))
+        eligible = {ck for ck, _, _ in ranked[:k]}
+
+        logger.debug(
+            "Iteration %d | escalating %d candidates: %s",
+            state["iteration"] + 1,
+            len(eligible),
+            sorted(eligible),
         )
 
         # Update history + emit events for fast_surrogate
@@ -252,12 +275,18 @@ def make_evaluate_candidates(ctx: dict):
             )
 
         # 2) Optional escalation per candidate (microkinetic_lite, dft_adsorption, etc.)
-        for ck, c in cand_pairs:
+        for ck, c, _ in ranked:
             h = histories[ck]
+
+            # Decide characterizers, but only escalate if within top-K
             to_run = choose_characterizers(c, h)
 
             # We already ran fast_surrogate in batch; remove it if present
             to_run = [ch for ch in to_run if ch != "fast_surrogate"]
+
+            # Budget gate: only top-K may escalate
+            if ck not in eligible:
+                to_run = [ch for ch in to_run if ch == "fast_surrogate"]
 
             for ch in to_run:
                 ts = time.time()

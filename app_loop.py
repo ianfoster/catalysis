@@ -62,6 +62,12 @@ def parse_args() -> argparse.Namespace:
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help="Logging level (default: %(default)s).",
     )
+    p.add_argument(
+        "--escalate-k",
+        type=int,
+        default=5,
+        help="Max number of candidates per iteration eligible for microkinetic escalation (default: %(default)s).",
+    )
     return p.parse_args()
 
 async def main() -> int:
@@ -131,14 +137,24 @@ async def main() -> int:
         ctx = {
             "encode_catalyst": lambda **kw: call_tool("encode_catalyst", **kw),
             "predict_performance": lambda **kw: call_tool("predict_performance", **kw),
-            "estimate_cost": lambda **kw: call_tool("estimate_cost", **kw),
+            #"estimate_cost": lambda **kw: call_tool("estimate_cost", **kw),
             "estimate_catalyst_cost": lambda **kw: call_tool("estimate_catalyst_cost", **kw),
             "microkinetic_lite": lambda **kw: call_tool("microkinetic_lite", **kw),
         }
+        ctx["submit_characterization"] = lambda **kw: call_tool("submit_characterization", **kw)
+        ctx["get_characterization"] = lambda **kw: call_tool("get_characterization", **kw)
         if cache is not None:
             ctx["cache_get"] = cache.get
             ctx["cache_set"] = cache.set
             ctx["cache_key"] = lambda candidate, characterizer: make_cache_key(candidate, characterizer, version)
+
+        logger.info(
+            "Run config | iterations=%d | concurrency=%d | escalate_k=%d | cache=%s",
+            args.max_iterations,
+            args.concurrency,
+            args.escalate_k,
+            "disabled" if args.no_cache else "enabled",
+        )
 
         graph = build_loop_graph(ctx)
 
@@ -152,6 +168,7 @@ async def main() -> int:
             "max_iterations": args.max_iterations,
             "char_history": {},
             "concurrency": args.concurrency,  
+            "escalate_k": args.escalate_k, 
         }
 
         # Run the loop
@@ -164,6 +181,21 @@ async def main() -> int:
                 if node_name == "select":
                     iteration = payload["iteration"]
                     best = payload["best"]
+
+                    logger.info(
+                        "Iteration %d | best score %.3f | support=%s",
+                        iteration,
+                        best["score"],
+                        best["candidate"]["support"],
+                    )
+
+                    # Log escalation budget decision
+                    logger.info(
+                        "Iteration %d | escalation budget: top %d / %d candidates",
+                        iteration,
+                        state["escalate_k"],
+                        len(state["candidates"]),
+                    )
         
                     record = {
                         "run_id": run_id,
