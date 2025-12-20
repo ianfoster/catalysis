@@ -3,6 +3,7 @@ import asyncio
 import argparse
 import logging
 import os
+import json
 from typing import Optional
 
 from academy.exchange import LocalExchangeFactory
@@ -51,12 +52,42 @@ async def main() -> int:
 
         agent = await build_react_agent(model=model, api_key=token, base_url=base_url, tools=tools)
 
-        question = "What is the cost of benzene? Use SMILES c1ccccc1 and return the numeric value."
+        smiles = "c1ccccc1"
+        question = (
+            "You are an assistant in a catalyst discovery stack. "
+            f"Use the SMILES {smiles}. "
+            "Call tools as needed to compute: (1) estimated cost, (2) color, (3) ionization energy. "
+            "Then return a brief summary and a one-line decision: KEEP or REJECT."
+        )
+        
+        logger.info("Query: %s", question)
+        
         result = await agent.ainvoke({"messages": [{"role": "user", "content": question}]})
-
-        answer = extract_final_answer(result)
-        print(answer)
-
+        
+        from orchestration.graph import extract_tool_results, extract_tool_calls, extract_final_answer
+        
+        tool_calls = extract_tool_calls(result)
+        tool_results = extract_tool_results(result)
+        final_answer = extract_final_answer(result)
+        
+        logger.info("Tool calls: %s", tool_calls)
+        logger.info("Tool results: %s", tool_results)
+        logger.info("Final answer: %s", final_answer)
+        
+        # Simple derived decision for now
+        decision = "KEEP" if "KEEP" in final_answer.upper() else ("REJECT" if "REJECT" in final_answer.upper() else "UNSPECIFIED")
+        
+        record = {
+            "query": question,
+            "smiles": smiles,
+            "tool_calls": tool_calls,
+            "tool_results": tool_results,
+            "final_answer": final_answer,
+            "decision": decision,
+        }
+        
+        print(json.dumps(record, indent=2))
+        
     return 0
 
 if __name__ == "__main__":
