@@ -9,14 +9,15 @@ import uuid
 import random
 import asyncio
 
+import hashlib
+import json
 
 from langgraph.graph import StateGraph, END
 
 from orchestration.characterizers import CHARACTERIZERS
+from orchestration.ids import candidate_id
+from orchestration.scoring import score_candidate
 
-def _candidate_key(c: dict) -> str:
-    """Stable-enough key for now. Replace with a real candidate_id later."""
-    return repr(c)
 
 def choose_characterizers(candidate: dict, history_for_candidate: Dict[str, Any]) -> List[str]:
     """
@@ -200,7 +201,7 @@ def make_evaluate_candidates(ctx: dict):
         evals: List[dict] = []
 
         for c in state["candidates"]:
-            ck = _candidate_key(c)
+            ck = candidate_id(c)
             state["char_history"].setdefault(ck, {})
             h = state["char_history"][ck]
 
@@ -299,7 +300,7 @@ def make_evaluate_candidates(ctx: dict):
                     })
 
             # Build evaluation using accumulated history
-            score = score_from_history(h)
+            score = score_candidate(h)
 
             evals.append(
                 {
