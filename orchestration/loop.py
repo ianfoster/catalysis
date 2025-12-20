@@ -212,26 +212,46 @@ def make_evaluate_candidates(ctx: dict):
                 ts = time.time()
 
                 if char == "fast_surrogate":
-                    enc = await ctx["encode_catalyst"](support=c["support"], metals=c["metals"])
-                    perf = await ctx["predict_performance"](feature_vector=enc["feature_vector"])
-                    cost = await ctx["estimate_catalyst_cost"](support=c["support"], metals=c["metals"])
+                    cache_key = None
+                    cached = None
+                    if "cache_key" in ctx and "cache_get" in ctx:
+                        cache_key = ctx["cache_key"](c, "fast_surrogate")
+                        cached = ctx["cache_get"](cache_key)
 
-                    h["fast_surrogate"] = {
-                        "encoding": enc,
-                        "performance": perf,
-                        "catalyst_cost": cost,
-                    }
+                    if cached is not None:
+                        # cached value should match what we store (see below)
+                        h["fast_surrogate"] = cached
+                        char_events.append({
+                            "run_id": state["run_id"],
+                            "iteration": state["iteration"] + 1,
+                            "candidate_key": ck,
+                            "candidate": c,
+                            "characterizer": "fast_surrogate",
+                            "status": "CACHED",
+                            "result": cached,
+                            "ts": ts,
+                        })
+                    else:
+                        enc = await ctx["encode_catalyst"](support=c["support"], metals=c["metals"])
+                        perf = await ctx["predict_performance"](feature_vector=enc["feature_vector"])
+                        cost = await ctx["estimate_catalyst_cost"](support=c["support"], metals=c["metals"])
 
-                    char_events.append({
-                        "run_id": state["run_id"],
-                        "iteration": state["iteration"] + 1,
-                        "candidate_key": ck,
-                        "candidate": c,
-                        "characterizer": "fast_surrogate",
-                        "status": "SUCCEEDED",
-                        "result": h["fast_surrogate"],
-                        "ts": ts,
-                    })
+                        computed = {"encoding": enc, "performance": perf, "catalyst_cost": cost}
+                        h["fast_surrogate"] = computed
+
+                        if cache_key is not None and "cache_set" in ctx:
+                            ctx["cache_set"](cache_key, computed)
+
+                        char_events.append({
+                            "run_id": state["run_id"],
+                            "iteration": state["iteration"] + 1,
+                            "candidate_key": ck,
+                            "candidate": c,
+                            "characterizer": "fast_surrogate",
+                            "status": "SUCCEEDED",
+                            "result": computed,
+                            "ts": ts,
+                        })
 
                 elif char == "microkinetic_lite":
                     # Only run if tool is available; otherwise mark skipped

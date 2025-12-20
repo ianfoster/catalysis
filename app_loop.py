@@ -27,6 +27,7 @@ from orchestration.tools import make_hpc_tools
 
 from orchestration.tools import make_catalyst_tools, make_performance_tools, make_economics_tools
 from orchestration.loop import build_loop_graph
+from orchestration.cache import JsonlCache, make_cache_key, detect_version
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,8 @@ logger.info("Run ID: %s", run_id)
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
+    p.add_argument("--cache-path", default="data/char_cache.jsonl", help="JSONL cache path (default: %(default)s).")
+    p.add_argument("--no-cache", action="store_true", help="Disable cache reads/writes.")
     p.add_argument("--max-iterations", type=int, default=3)
     p.add_argument("--out", default="data/runs.jsonl")
     p.add_argument("--gc-endpoint", default=None, help="Globus Compute endpoint UUID")
@@ -69,6 +72,16 @@ async def main() -> int:
         #random.seed(args.seed)
         np.random.seed(args.seed)
         logger.info("Random seed set to %d", args.seed)
+
+    version = detect_version()
+    logger.info("Code version: %s", version)
+    
+    cache = None
+    if not args.no_cache:
+        cache = JsonlCache.load(args.cache_path)
+        logger.info("Cache enabled: %s (entries=%d)", args.cache_path, len(cache.index))
+    else:
+        logger.info("Cache disabled")
 
     Path("data").mkdir(exist_ok=True)
 
@@ -115,6 +128,10 @@ async def main() -> int:
             "estimate_catalyst_cost": lambda **kw: call_tool("estimate_catalyst_cost", **kw),
             "microkinetic_lite": lambda **kw: call_tool("microkinetic_lite", **kw),
         }
+        if cache is not None:
+            ctx["cache_get"] = cache.get
+            ctx["cache_set"] = cache.set
+            ctx["cache_key"] = lambda candidate, characterizer: make_cache_key(candidate, characterizer, version)
 
         graph = build_loop_graph(ctx)
 
