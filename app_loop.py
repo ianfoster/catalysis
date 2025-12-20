@@ -44,6 +44,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--gc-endpoint", default=None, help="Globus Compute endpoint UUID")
     p.add_argument("--gc-func-fast", default=None, help="Function ID for fast characterizer")
     p.add_argument(
+        "--concurrency",
+        type=int,
+        default=32,
+        help="Max concurrent characterizer executions (default: %(default)s).",
+    )
+    p.add_argument(
         "-s", "--seed",
         type=int,
         default=None,
@@ -67,6 +73,7 @@ async def main() -> int:
 
     # Ensure non-academy loggers also honor the level
     logging.getLogger().setLevel(level)
+    logger.info("Concurrency set to %d", args.concurrency)
 
     if args.seed is not None:
         #random.seed(args.seed)
@@ -144,6 +151,7 @@ async def main() -> int:
             "iteration": 0,
             "max_iterations": args.max_iterations,
             "char_history": {},
+            "concurrency": args.concurrency,  
         }
 
         # Run the loop

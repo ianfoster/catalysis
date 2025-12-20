@@ -111,6 +111,7 @@ class LoopState(TypedDict):
     max_iterations: int
     iteration_record: Optional[dict]
     char_history: Dict[str, Dict[str, Any]]  # candidate_key -> {characterizer -> result}
+    concurrency: int
 
 def propose_candidates_OLD(_: LoopState) -> Dict[str, Any]:
     candidates = [
@@ -222,7 +223,7 @@ def make_evaluate_candidates(ctx: dict):
             "fast_surrogate",
             cand_pairs,
             histories,
-            concurrency=32,   # tune later / make CLI option
+            concurrency=state.get("concurrency", 32),
         )
 
         # Update history + emit events for fast_surrogate
