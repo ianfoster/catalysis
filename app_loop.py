@@ -28,6 +28,9 @@ from orchestration.tools import make_hpc_tools
 from orchestration.tools import make_catalyst_tools, make_performance_tools, make_economics_tools
 from orchestration.loop import build_loop_graph
 from orchestration.cache import JsonlCache, make_cache_key, detect_version
+from orchestration.config import load_config
+from orchestration.seen import load_seen
+from orchestration.seen import append_seen
 
 logger = logging.getLogger(__name__)
 
@@ -43,10 +46,30 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--out", default="data/runs.jsonl")
     p.add_argument("--gc-endpoint", default=None, help="Globus Compute endpoint UUID")
     p.add_argument("--gc-func-fast", default=None, help="Function ID for fast characterizer")
+    p.add_argument("--gc-func-mk", default=None)
     p.add_argument("--gc-timeout", type=float, default=300.0,
                    help="Max seconds to wait for GC batch completion (default: %(default)s).")
     p.add_argument("--poll-interval", type=float, default=0.25,
                    help="Polling interval for GC task status (default: %(default)s).")
+    p.add_argument("--gc-retries", type=int, default=2,
+                   help="Number of retries for transient GC submit/poll errors (default: %(default)s).")
+    p.add_argument("--gc-retry-backoff", type=float, default=1.0,
+                   help="Base seconds for exponential backoff between GC retries (default: %(default)s).")
+    # Config files (base + local overlay)
+    p.add_argument("--config", default="config.yaml", help="Base config file (default: %(default)s).")
+    p.add_argument("--config-local", default="config.local.yaml",
+                   help="Local override config file (default: %(default)s).")
+    p.add_argument("--seen-path", default="data/seen_candidates.jsonl",
+               help="Path to persistent seen-candidate log (default: %(default)s).")
+    p.add_argument("--no-seen", action="store_true",
+               help="Disable seen-candidate tracking (debug).")
+    p.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Number of candidates to propose/evaluate per iteration (default: from config or seed size).",
+    )
+ 
     p.add_argument(
         "--concurrency",
         type=int,
@@ -75,82 +98,132 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 async def main() -> int:
-    init_logging(logging.INFO)
     args = parse_args()
 
-    level = getattr(logging, args.log_level.upper(), logging.INFO)
+    # Load config early (base + local overlay)
+    cfg = load_config(args.config, args.config_local)
+
+    # Apply logging level from CLI if provided, else config, else INFO
+    cfg_log_level = (cfg.get("run", {}) or {}).get("log_level")
+    log_level_str = (args.log_level or cfg_log_level or "INFO").upper()
+    level = getattr(logging, log_level_str, logging.INFO)
     init_logging(level)
-
-    # Ensure non-academy loggers also honor the level
     logging.getLogger().setLevel(level)
-    logger.info("Concurrency set to %d", args.concurrency)
 
-    if args.seed is not None:
-        #random.seed(args.seed)
-        np.random.seed(args.seed)
-        logger.info("Random seed set to %d", args.seed)
+    # Resolve defaults from config if CLI not provided
+    run_cfg = cfg.get("run", {}) or {}
+    paths_cfg = cfg.get("paths", {}) or {}
+    gc_cfg = cfg.get("globus_compute", {}) or {}
+    gc_funcs = (gc_cfg.get("functions", {}) or {})
 
-    version = detect_version()
-    logger.info("Code version: %s", version)
-    
+    max_iterations = args.max_iterations if args.max_iterations is not None else int(run_cfg.get("max_iterations", 3))
+    concurrency = args.concurrency if args.concurrency is not None else int(run_cfg.get("concurrency", 32))
+    escalate_k = args.escalate_k if args.escalate_k is not None else int(run_cfg.get("escalate_k", 5))
+    poll_interval = args.poll_interval if args.poll_interval is not None else float(run_cfg.get("poll_interval", 0.5))
+    gc_timeout = args.gc_timeout if args.gc_timeout is not None else float(run_cfg.get("gc_timeout", 300))
+    gc_retries = args.gc_retries if args.gc_retries is not None else int(run_cfg.get("gc_retries", 2))
+    gc_retry_backoff = args.gc_retry_backoff if args.gc_retry_backoff is not None else float(run_cfg.get("gc_retry_backoff", 1.0))
+
+    batch_size = args.batch_size if args.batch_size is not None else int(run_cfg.get("batch_size", 6))
+
+    out_path = args.out if args.out is not None else str(paths_cfg.get("out_jsonl", "data/runs.jsonl"))
+    cache_path = args.cache_path if args.cache_path is not None else str(paths_cfg.get("cache_jsonl", "data/char_cache.jsonl"))
+
+    # Globus Compute enablement: CLI overrides config
+    gc_enabled_cfg = bool(gc_cfg.get("enabled", False))
+    gc_endpoint = args.gc_endpoint if args.gc_endpoint is not None else gc_cfg.get("endpoint_id")
+    gc_func_fast = args.gc_func_fast if args.gc_func_fast is not None else gc_funcs.get("fast_surrogate")
+    gc_func_mk = args.gc_func_mk if args.gc_func_mk is not None else gc_funcs.get("microkinetic_lite")
+
+    use_gc = bool(gc_endpoint and gc_func_fast) and (args.gc_endpoint is not None or args.gc_func_fast is not None or gc_enabled_cfg)
+    gc_requested = bool(gc_endpoint and gc_func_fast) and \
+        ( args.gc_endpoint is not None or args.gc_func_fast is not None or gc_enabled_cfg )
     cache = None
     if not args.no_cache:
-        cache = JsonlCache.load(args.cache_path)
-        logger.info("Cache enabled: %s (entries=%d)", args.cache_path, len(cache.index))
+        cache = JsonlCache.load(cache_path)
+
+    seen = set()
+    if not args.no_seen:
+        seen = load_seen(args.seen_path)
+        logger.info("Seen-candidates loaded: %d", len(seen))
     else:
-        logger.info("Cache disabled")
+        logger.info("Seen-candidates disabled")
 
-    Path("data").mkdir(exist_ok=True)
-
+    # Seed and run config logging
+    logger.info("Concurrency set to %d", concurrency)
+    logger.info("Run config | iterations=%d | concurrency=%d | escalate_k=%d | cache=%s",
+                max_iterations, concurrency, escalate_k, "disabled" if args.no_cache else "enabled")
     async with await Manager.from_exchange_factory(LocalExchangeFactory()) as manager:
         cat = await manager.launch(CatalystSkill)
         perf = await manager.launch(PerformanceSkill)
-        econ = await manager.launch(EconomicsSkill)  # not used in v1 score, but ready
+        econ = await manager.launch(EconomicsSkill)
         mk = await manager.launch(MicrokineticSkill)
-        use_gc = args.gc_endpoint is not None and args.gc_func_fast is not None
-        if use_gc:
-            logger.info("Globus Compute ENABLED (endpoint=%s)", args.gc_endpoint)
-        else:
-            logger.info("Globus Compute DISABLED (local-only mode)")
-
-        if use_gc:
-            hpc = await manager.launch(
-                HPCCharacterizerSkill,
-                kwargs={
-                    "endpoint_id": args.gc_endpoint,
-                    "function_map": {
-                        "fast_surrogate": args.gc_func_fast,
-                    },
-                },
-            )
-
+    
+        # Build tool list first (local tools always available)
         tools = []
         tools.extend(make_catalyst_tools(cat))
         tools.extend(make_performance_tools(perf))
         tools.extend(make_economics_tools(econ))
-        if use_gc: tools.extend(make_hpc_tools(hpc))
-        tools.extend(make_microkinetic_tools(mk)) 
-
-        # Build a callable context from tools by name
+        tools.extend(make_microkinetic_tools(mk))
+    
+        # Try to enable GC only if requested
+        gc_available = False
+        hpc = None
+        if gc_requested:
+            logger.info("Globus Compute requested (endpoint=%s)", gc_endpoint)
+            try:
+                function_map = {"fast_surrogate": gc_func_fast}
+                if gc_func_mk:
+                    function_map["microkinetic_lite"] = gc_func_mk
+    
+                hpc = await manager.launch(
+                    HPCCharacterizerSkill,
+                    kwargs={"endpoint_id": gc_endpoint, "function_map": function_map},
+                )
+                tools.extend(make_hpc_tools(hpc))
+                gc_available = True
+                logger.info("Globus Compute ENABLED (HPCCharacterizerSkill launched)")
+            except Exception as e:
+                logger.warning("Globus Compute DISABLED (failed to init HPCCharacterizerSkill): %r", e)
+        else:
+            logger.info("Globus Compute not requested; running local-only")
+    
+        # Registry of tools
         tool_by_name = {t.name: t for t in tools}
+        have_gc_tools = ("submit_characterization" in tool_by_name) and ("get_characterization" in tool_by_name)
+    
+        if gc_available and not have_gc_tools:
+            logger.warning("GC was enabled but submit/get tools are missing; falling back to local-only")
+            gc_available = False
+            have_gc_tools = False
+    
         logger.info("Tools: %s", sorted(tool_by_name.keys()))
-
+    
         async def call_tool(name: str, **kwargs):
             return await tool_by_name[name].ainvoke(kwargs)
-
+    
+        # Callable context passed into the loop
         ctx = {
             "encode_catalyst": lambda **kw: call_tool("encode_catalyst", **kw),
             "predict_performance": lambda **kw: call_tool("predict_performance", **kw),
-            #"estimate_cost": lambda **kw: call_tool("estimate_cost", **kw),
             "estimate_catalyst_cost": lambda **kw: call_tool("estimate_catalyst_cost", **kw),
             "microkinetic_lite": lambda **kw: call_tool("microkinetic_lite", **kw),
         }
-        ctx["submit_characterization"] = lambda **kw: call_tool("submit_characterization", **kw)
-        ctx["get_characterization"] = lambda **kw: call_tool("get_characterization", **kw)
+    
+        if have_gc_tools:
+            ctx["submit_characterization"] = lambda **kw: call_tool("submit_characterization", **kw)
+            ctx["get_characterization"] = lambda **kw: call_tool("get_characterization", **kw)
+        else:
+            logger.info("GC tools not available; using local executor")
+
         if cache is not None:
             ctx["cache_get"] = cache.get
             ctx["cache_set"] = cache.set
             ctx["cache_key"] = lambda candidate, characterizer: make_cache_key(candidate, characterizer, version)
+
+        logger.info("CTX keys: %s", sorted(ctx.keys()))
+        assert "submit_characterization" in ctx, "ctx missing submit_characterization"
+        assert "get_characterization" in ctx, "ctx missing get_characterization"
 
         logger.info(
             "Run config | iterations=%d | concurrency=%d | escalate_k=%d | cache=%s",
@@ -175,6 +248,12 @@ async def main() -> int:
             "escalate_k": args.escalate_k, 
             "gc_timeout": args.gc_timeout,
             "poll_interval": args.poll_interval,
+            "gc_retries": args.gc_retries,
+            "gc_retry_backoff": args.gc_retry_backoff,
+            "batch_size": args.batch_size,
+            "seen_candidates": list(seen),
+            "seen_path": args.seen_path,
+            "no_seen": args.no_seen,
         }
 
         # Run the loop
@@ -197,10 +276,9 @@ async def main() -> int:
 
                     # Log escalation budget decision
                     logger.info(
-                        "Iteration %d | escalation budget: top %d / %d candidates",
+                        "Iteration %d | escalation budget: top %d candidates",
                         iteration,
                         state["escalate_k"],
-                        len(state["candidates"]),
                     )
         
                     record = {
@@ -223,11 +301,24 @@ async def main() -> int:
                         record["best_score"],
                         record["best_candidate"]["support"] if best else "n/a",
                     )
+
                 if node_name == "evaluate" and "char_events" in payload:
-                    for rec in payload["char_events"]:
-                        with open(args.out, "a", encoding="utf-8") as f:
+                    events = payload["char_events"]
+
+                    # Write all events in one file open
+                    with open(args.out, "a", encoding="utf-8") as f:
+                        for rec in events:
                             f.write(json.dumps(rec) + "\n")
-        
+                
+                    if not state.get("no_seen", False):
+                        # persist all candidate_ids evaluated this iteration
+                        ids = {
+                            rec["candidate_id"]
+                            for rec in events
+                            if rec.get("characterizer") == "fast_surrogate"
+                        }
+                        append_seen(state["seen_path"], ids)
+
                 final_state = payload
 
         # Persist the final result record

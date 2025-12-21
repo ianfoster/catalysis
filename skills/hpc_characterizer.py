@@ -3,6 +3,9 @@ from __future__ import annotations
 from academy.agent import Agent, action
 from hpc.globus_compute import GlobusComputeAdapter
 
+import logging
+logger = logging.getLogger(__name__)
+
 
 class HPCCharacterizerSkill(Agent):
     """
@@ -15,6 +18,7 @@ class HPCCharacterizerSkill(Agent):
         self.endpoint_id = endpoint_id
         self.function_map = function_map
         self.gc = GlobusComputeAdapter(endpoint_id)
+        logger.info("HPC function_map: %s", self.function_map)
 
     @action
     async def submit(self, req: dict) -> dict:

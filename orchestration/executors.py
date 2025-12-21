@@ -171,14 +171,19 @@ class GCExecutor:
         *,
         poll_interval_s: float = 0.25,
         timeout_s: Optional[float] = None,
+        max_retries: int = 2,
+        retry_backoff_s: float = 1.0
     ):
         self.ctx = ctx
         self.poll_interval_s = poll_interval_s
         self.timeout_s = timeout_s
+        self.max_retries = max_retries
+        self.retry_backoff_s = retry_backoff_s
 
         # Fail fast if GC tools aren't present
         if "submit_characterization" not in ctx or "get_characterization" not in ctx:
-            raise ValueError("GCExecutor requires ctx['submit_characterization'] and ctx['get_characterization'].")
+            raise RuntimeError(f"GCExecutor misconfigured; ctx keys={sorted(ctx.keys())}")
+            #raise ValueError("GCExecutor requires ctx['submit_characterization'] and ctx['get_characterization'].")
 
     async def run(
         self,
@@ -186,6 +191,7 @@ class GCExecutor:
         candidate: dict,
         history: dict,
         *,
+        candidate_id=None,
         timeout_s: Optional[float] = None,
     ):
         t0 = time.time()
@@ -230,6 +236,14 @@ class GCExecutor:
                 return
 
             task_id = sub.get("task_id")
+            # logger.info("GC submit | char=%s | task_id=%s", characterizer, task_id)
+            logger.info(
+                "GC submit | char=%s | candidate_id=%s | task_id=%s",
+                characterizer,
+                self.ctx["cache_key"](candidate, characterizer) if "cache_key" in self.ctx else "<unknown>",
+                task_id,
+            )
+
             if not task_id:
                 return ExecResult(
                     characterizer=characterizer,
@@ -335,7 +349,34 @@ class GCExecutor:
                         return
 
                 payload = {"candidate": c, "history": histories.get(ck, {})}
-                sub = await submit(characterizer=characterizer, payload=payload)
+                # sub = await submit(characterizer=characterizer, payload=payload)
+                sub = None
+                last_err = None
+                for attempt in range(self.max_retries + 1):
+                    try:
+                        sub = await submit(characterizer=characterizer, payload=payload)
+                        last_err = None
+                        break
+                    except Exception as e:
+                        last_err = e
+                        # exponential backoff: 1, 2, 4, ...
+                        delay = self.retry_backoff_s * (2 ** attempt)
+                        logger.warning(
+                            "GC submit error | char=%s | candidate_id=%s | attempt=%d/%d | err=%r | sleeping=%.2fs",
+                            characterizer, ck, attempt + 1, self.max_retries + 1, e, delay
+                        )
+                        await asyncio.sleep(delay)
+                
+                if sub is None:
+                    results[ck] = ExecResult(
+                        characterizer=characterizer,
+                        status="FAILED",
+                        result={"error": f"submit failed after retries: {repr(last_err)}", "task": {"candidate_id": ck}},
+                        latency_s=time.time() - t0,
+                        provenance={"mode": "globus_compute"},
+                    )
+                    return
+
                 task_id = sub.get("task_id")
                 if not task_id:
                     results[ck] = ExecResult(
