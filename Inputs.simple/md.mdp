@@ -21,12 +21,12 @@ pcoupl          = no
 
 cutoff-scheme   = Verlet
 nstlist         = 10
-rcoulomb        = 1.0
-rvdw            = 1.0
+rlist           = 0.4
+rcoulomb        = 0.4
+rvdw            = 0.4
 
-coulombtype     = PME
-pme_order       = 4
-fourierspacing  = 0.16
+coulombtype     = Cut-off
+vdwtype         = Cut-off
 
 gen_vel         = yes
 gen_temp        = 300
