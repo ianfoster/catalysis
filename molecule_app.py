@@ -8,6 +8,8 @@ import random
 import time
 from pathlib import Path
 from typing import Any, Dict, List
+import re
+import subprocess
 
 from academy.exchange import LocalExchangeFactory
 from academy.logging import init_logging
@@ -18,8 +20,13 @@ from langchain_core.tools import BaseTool
 from academy.handle import Handle
 from skills.rdkit_skill import RDKitSkill
 from orchestration.molecule_loop import Constraints, Weights, propose, evaluate_batch, select
-from orchestration.openmm_escalation import OpenMMEscalator, OpenMMEscalatorConfig
+from orchestration.openmm_escalation import OpenMMEscalator
+from orchestration.gromacs_escalation import GromacsEscalator
+from orchestration.cache import OpenMMJsonlCache
 from orchestration.molecule_loop import escalate_openmm
+from orchestration.molecule_loop import escalate_gromacs
+
+from globus_compute_sdk import Client as GCClient
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +90,11 @@ async def main() -> int:
     ap.add_argument("--openmm-spark-base", default="/home/ian/openmm-runs")
     ap.add_argument("--openmm-platform", default="OpenCL")
     ap.add_argument("--openmm-max-it", type=int, default=2000)
+    ap.add_argument("--openmm-cache", default="data/openmm_cache.jsonl")
+    ap.add_argument("--no-openmm-cache", action="store_true")
+    ap.add_argument("--gmx-k", type=int, default=0)
+    ap.add_argument("--gmx-function-id", type=str)
+    ap.add_argument("--gmx-spark-dir", default="/home/ian/gmx-mol-runs")
     args = ap.parse_args()
 
     level = getattr(logging, args.log_level.upper(), logging.INFO)
@@ -96,40 +108,131 @@ async def main() -> int:
     constraints = Constraints()
     weights = Weights()
 
+    gc = GCClient()
+
+    openmm_cache = None
+    if args.openmm_k > 0 and not args.no_openmm_cache:
+        openmm_cache = OpenMMJsonlCache.load(args.openmm_cache)
+
     async with await Manager.from_exchange_factory(LocalExchangeFactory()) as manager:
         rdkit = await manager.launch(RDKitSkill)
-        #openmm = await manager.launch(OpenMMSkill)
         tools = make_rdkit_tools(rdkit)
         tool_by_name = {t.name: t for t in tools}
 
         async def call_tool(name: str, **kwargs):
             return await tool_by_name[name].ainvoke(kwargs)
 
+        def _sh(cmd: list[str]) -> str:
+            p = subprocess.run(cmd, capture_output=True, text=True)
+            if p.returncode != 0:
+                raise RuntimeError(f"Command failed: {' '.join(cmd)}\nSTDERR:\n{p.stderr}\nSTDOUT:\n{p.stdout}")
+            return p.stdout.strip()
+        
+        def _parse_task_id(out: str) -> str:
+            m = re.search(r"Task ID:\s*([0-9a-f-]+)", out, re.IGNORECASE)
+            if not m:
+                raise RuntimeError(f"Could not parse Globus task id from:\n{out}")
+            return m.group(1)
+        
+        def _globus_transfer(src_ep: str, src_path: str, dst_ep: str, dst_path: str, *, recursive: bool = True) -> str:
+            cmd = ["globus", "transfer", f"{src_ep}:{src_path}", f"{dst_ep}:{dst_path}"]
+            if recursive:
+                cmd.append("--recursive")
+            out = _sh(cmd)
+            return _parse_task_id(out)
+        
+        def _globus_wait(task_id: str) -> None:
+            _sh(["globus", "task", "wait", task_id])
+
         ctx = {"rdkit_descriptors": lambda **kw: call_tool("rdkit_descriptors", **kw)}
-        #ctx["openmm_minimize"] = lambda **kw: call_tool("openmm_minimize", **kw)
+
+
+        async def globus_transfer_to_spark(*, src_path: str, dst_path: str, recursive: bool = True):
+            tid = _globus_transfer(args.mac_transfer_ep, src_path, args.spark_transfer_ep, dst_path, recursive=recursive)
+            _globus_wait(tid)
+            return tid
+
+        async def globus_transfer_from_spark(*, src_path: str, dst_path: str, recursive: bool = True):
+            tid = _globus_transfer(args.spark_transfer_ep, src_path, args.mac_transfer_ep, dst_path, recursive=recursive)
+            _globus_wait(tid)
+            return tid
+
+        def globus_transfer_to_spark_OLD(local_path: str, spark_path: str) -> str:
+            return _globus_transfer(
+                src_ep=args.mac_transfer_ep,
+                src_path=local_path,
+                dst_ep=args.spark_transfer_ep,
+                dst_path=spark_path,
+                recursive=True,
+            )
+
+        def globus_transfer_from_spark_OLD(spark_path: str, local_path: str) -> str:
+            return _globus_transfer(
+                src_ep=args.spark_transfer_ep,
+                src_path=spark_path,
+                dst_ep=args.mac_transfer_ep,
+                dst_path=local_path,
+                recursive=True,
+            )
 
         if args.openmm_k > 0:
             if not args.openmm_function_id:
                 raise RuntimeError("--openmm-k set but --openmm-function-id not provided")
-
-            escalator = OpenMMEscalator(OpenMMEscalatorConfig(
-                mac_transfer_ep=args.mac_transfer_ep,
-                spark_transfer_ep=args.spark_transfer_ep,
+            openmm = OpenMMEscalator(
+                gc_client=gc,
                 spark_compute_ep=args.spark_compute_ep,
                 openmm_function_id=args.openmm_function_id,
                 spark_base_dir=args.openmm_spark_base,
+                transfer_to_spark=globus_transfer_to_spark,
+                transfer_from_spark=globus_transfer_from_spark,
                 platform=args.openmm_platform,
                 max_iterations=args.openmm_max_it,
-            ))
-            ctx["openmm_escalate"] = escalator.run
+                cache=openmm_cache,
+                local_stage_dir="data/openmm_stage",  # optional
+            )
+            ctx["openmm_escalate"] = openmm.run
+
+        if args.gmx_k > 0:
+            if not args.gmx_function_id:
+                raise RuntimeError("--gmx-k set but --gmx-function-id not provided")
+            gmx = GromacsEscalator(
+                gc_client=gc,
+                gmx_function_id=args.gmx_function_id,
+                spark_compute_ep=args.spark_compute_ep,
+                spark_base_dir=args.gmx_spark_dir,
+                transfer_to_spark=globus_transfer_to_spark,
+                transfer_from_spark=globus_transfer_from_spark,
+            )
+            ctx["gromacs_escalate"] = gmx.run
 
         seen_ids: set[str] = set()
         seen_descs: List[Dict[str, float]] = []
 
         for it in range(args.iterations):
             smiles_batch = propose(DEFAULT_SEEDS, args.batch_size, rng)
-            accepted, rejected = await evaluate_batch(ctx, smiles_batch, constraints)
+            accepted, rejected, rdkit_stats = await evaluate_batch(ctx, smiles_batch, constraints)
             accepted = await escalate_openmm(ctx, accepted, top_k=args.openmm_k)
+            accepted = await escalate_gromacs(ctx, accepted, top_k=args.gmx_k)
+
+            logger.info(
+                "Iter %d | RDKit wall=%.3fs avg=%.2fms accepted=%d rejected=%d",
+                it + 1,
+                rdkit_stats["rdkit_wall_s"],
+                rdkit_stats["avg_call_ms"],
+                len(accepted),
+                len(rejected),
+            )
+
+            rdkit_cost_path = Path("data/rdkit_cost.jsonl")
+            rdkit_cost_path.parent.mkdir(parents=True, exist_ok=True)
+
+            with rdkit_cost_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "ts": time.time(),
+                    "iteration": it + 1,
+                    **rdkit_stats,
+                    "batch_size": len(smiles_batch),
+                }) + "\n")
 
             #print(f'RRRRRRRRRRR\n{rejected}\n====')
             #for r in rejected:
@@ -139,11 +242,8 @@ async def main() -> int:
             constr  = sum(1 for r in rejected if r.get("reason") == "constraint")
             logger.info("Iter %d | invalid=%d constraint=%d", it + 1, invalid, constr)
 
-            accepted = await escalate_openmm(
-                ctx,
-                accepted,
-                top_k=args.openmm_k,
-            )
+            accepted = await escalate_openmm(ctx, accepted, top_k=args.openmm_k)
+            accepted = await escalate_gromacs(ctx, accepted, top_k=args.gmx_k)
 
             # Only mark molecules as seen if RDKit parsed them (accepted or constraint-rejected),
             # not if they were invalid strings.
@@ -175,6 +275,7 @@ async def main() -> int:
                 "frontier_size": len(frontier),
                 "best": best,
                 "best_score": sel["best_score"],
+                "rdkit_stats": rdkit_stats
             }
 
             logger.info(

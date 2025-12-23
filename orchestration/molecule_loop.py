@@ -54,27 +54,27 @@ async def escalate_openmm(ctx, accepted, top_k: int):
     return accepted
 
 
-async def escalate_openmm_OLD(ctx: dict, accepted: list[dict], top_k: int) -> list[dict]:
-    """
-    Run OpenMM minimization on top-K accepted molecules.
-    Expects ctx["openmm_escalate"] = async fn(smiles)->dict
-    """
-    if top_k <= 0 or "openmm_escalate" not in ctx:
+async def escalate_gromacs(ctx, accepted, top_k: int):
+    if top_k <= 0 or "gromacs_escalate" not in ctx:
+        logger.info("GROMACS escalation | disabled or missing ctx key")
         return accepted
 
-    # rank: simple heuristic for demo (closest to logP target)
-    target_logp = 2.5
-    ranked = sorted(
-        accepted,
-        key=lambda m: abs(m["descriptors"]["MolLogP"] - target_logp)
-    )[: min(top_k, len(accepted))]
+    ranked = [m for m in accepted if m.get("openmm", {}).get("ok")]  # only if OpenMM succeeded
+    ranked = ranked[:min(top_k, len(ranked))]
 
-    logger.info("OpenMM escalation | selected=%d / accepted=%d", len(ranked), len(accepted))
-
+    logger.info("GROMACS escalation | selected=%d / accepted=%d", len(ranked), len(accepted))
+    
     for m in ranked:
-        res = await ctx["openmm_escalate"](m["smiles"])
-        m["openmm"] = res
-
+        logger.info("[GROMACS] call start | smiles=%s", m["smiles"])
+        res = await ctx["gromacs_escalate"](m["smiles"])
+        m["gromacs"] = res
+        logger.info(
+            "[GROMACS] call done  | smiles=%s | ok=%s | stage=%s | error=%s",
+            m["smiles"],
+            res.get("ok") if isinstance(res, dict) else None,
+            res.get("stage") if isinstance(res, dict) else None,
+            res.get("error") if isinstance(res, dict) else None,
+        )
     return accepted
 
 
@@ -155,7 +155,7 @@ def propose(seed_smiles: List[str], batch_size: int, rng: random.Random) -> List
     return out
 
 
-async def escalate_openmm(ctx, accepted, top_k: int):
+async def escalate_openmm_DUP(ctx, accepted, top_k: int):
     """
     Run OpenMM (via OpenMMEscalator) on top-K molecules.
     Expects ctx["openmm_escalate"] = async fn(smiles)->dict
@@ -233,13 +233,20 @@ async def evaluate_batch(
 
     rdkit = ctx["rdkit_descriptors"]
 
+    t_eval0 = time.time()
+    rdkit_call_s = 0.0
+    rdkit_calls = 0
+
     accepted = []
     rejected = []
     invalid  = 0
     constraint_fail = 0
 
     for smi in smiles_batch:
-        r = await rdkit(smiles=smi)   # <-- one string at a time
+        t0 = time.time()
+        r = await rdkit(smiles=smi)
+        rdkit_call_s += (time.time() - t0)
+        rdkit_calls += 1
         rec = {
             "smiles": smi,
             "mol_id": mol_id(smi),
@@ -281,7 +288,27 @@ async def evaluate_batch(
         len(accepted),
     )
 
-    return accepted, rejected
+    wall_s = time.time() - t_eval0
+    stats = {
+        "rdkit_wall_s": wall_s,
+        "rdkit_call_s": rdkit_call_s,
+        "rdkit_calls": rdkit_calls,
+        "invalid": invalid,
+        "constraint": constraint_fail,
+        "accepted": len(accepted),
+        "avg_call_ms": (1000.0 * rdkit_call_s / rdkit_calls) if rdkit_calls else 0.0,
+    }
+    logger.info(
+        "RDKit timing | wall=%.3fs calls=%d avg=%.2fms invalid=%d constraint=%d accepted=%d",
+        stats["rdkit_wall_s"],
+        stats["rdkit_calls"],
+        stats["avg_call_ms"],
+        stats["invalid"],
+        stats["constraint"],
+        stats["accepted"],
+    )
+
+    return accepted, rejected, stats
 
 
 def champion_score(item: Dict[str, Any], seen_descs: List[Dict[str, float]], w: Weights) -> float:

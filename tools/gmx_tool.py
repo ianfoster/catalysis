@@ -45,6 +45,7 @@ def run_gromacs(payload: Dict[str, Any]) -> Dict[str, Any]:
       }
     }
     """
+    print('XXXXX', payload)
     run_id = payload["run_id"]
     run_dir = Path(payload["run_dir"]).resolve()
     in_dir = run_dir / "input"
@@ -72,7 +73,10 @@ def run_gromacs(payload: Dict[str, Any]) -> Dict[str, Any]:
         "-o", str(tpr_path),
         "-maxwarn", str(g.get("maxwarn", 0)),
     ]
+
+    t_grompp0 = time.time()
     grompp_res = _run(grompp_cmd, cwd=work_dir, timeout_s=900)
+    grompp_s = time.time() - t_grompp0
     if grompp_res["returncode"] != 0:
         return {"ok": False, "run_id": run_id, "stage": "grompp", "detail": grompp_res}
 
@@ -88,7 +92,9 @@ def run_gromacs(payload: Dict[str, Any]) -> Dict[str, Any]:
     if m.get("gpu", False):
         mdrun_cmd += ["-nb", "gpu"]  # minimal GPU enable; tune later
 
+    t_mdrun0 = time.time()
     mdrun_res = _run(mdrun_cmd, cwd=work_dir, timeout_s=int(m.get("timeout_s", 3600)))
+    mdrun_s = time.time() - t_mdrun0
 
     # Output paths (expected)
     outputs = {
@@ -108,4 +114,9 @@ def run_gromacs(payload: Dict[str, Any]) -> Dict[str, Any]:
         "grompp": grompp_res,
         "mdrun": mdrun_res,
         "outputs": outputs,
+        "stage_times_s": {
+            "grompp_s": grompp_s,
+            "mdrun_s": mdrun_s,
+        },
+
     }

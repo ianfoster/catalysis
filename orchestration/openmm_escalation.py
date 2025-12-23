@@ -9,12 +9,22 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
+import hashlib
+from orchestration.cache import OpenMMJsonlCache
+from orchestration.escalators.base import BaseEscalator
 
 import logging
 logger = logging.getLogger(__name__)
 
-from globus_compute_sdk import Client
-
+def canonical_smiles(smiles: str) -> str:
+    try:
+        from rdkit import Chem
+        m = Chem.MolFromSmiles(smiles)
+        if m is None:
+            return smiles
+        return Chem.MolToSmiles(m, canonical=True)
+    except Exception:
+        return smiles
 
 def _sh(cmd: list[str], *, cwd: Optional[str] = None) -> str:
     p = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
@@ -44,39 +54,48 @@ def _globus_wait(task_id: str) -> None:
     _sh(["globus", "task", "wait", task_id])
 
 
-@dataclass
-class OpenMMEscalatorConfig:
-    # Transfer
-    mac_transfer_ep: str
-    spark_transfer_ep: str
+from orchestration.escalators.base import BaseEscalator
 
-    # Compute
-    spark_compute_ep: str
-    openmm_function_id: str
-
-    # Paths
-    spark_base_dir: str = "/home/ian/openmm-runs"
-    local_stage_dir: str = "data/openmm_stage"   # created on Mac
-
-    # OpenMM execution params
-    platform: str = "OpenCL"
-    max_iterations: int = 2000
-    timeout_s: int = 600
-    poll_s: float = 1.0
-
-
-class OpenMMEscalator:
+class OpenMMEscalator(BaseEscalator):
     """
     End-to-end:
       SMILES -> parameterize locally (OpenFF) -> transfer to Spark -> compute minimize -> return result
     """
+    def __init__(
+        self,
+        *,
+        gc_client,
+        spark_compute_ep: str,
+        openmm_function_id: str,
+        spark_base_dir: str,
+        transfer_to_spark,
+        transfer_from_spark,
+        platform: str = "OpenCL",
+        max_iterations: int = 2000,
+        cache=None,
+        local_stage_dir: str = "data/openmm_stage",
+        cost_path: str = "data/openmm_cost.jsonl",
+        timeout_s: float = 600.0,
+        poll_s: float = 1.0,
+    ):
+        super().__init__(
+            gc_client=gc_client,
+            transfer_to_spark=transfer_to_spark,
+            transfer_from_spark=transfer_from_spark,
+        )
 
-    def __init__(self, cfg: OpenMMEscalatorConfig):
-        self.cfg = cfg
-        self.gc = Client()
+        self.openmm_function_id = openmm_function_id
+        self.spark_base_dir = spark_base_dir
+        self.spark_compute_ep = spark_compute_ep
+        self.platform = platform
+        self.max_iterations = max_iterations
+        self.cache = cache
 
-        self.stage_root = Path(cfg.local_stage_dir)
+        self.stage_root = Path(local_stage_dir).resolve()
         self.stage_root.mkdir(parents=True, exist_ok=True)
+
+        self.cost_path = Path("data/openmm_cost.jsonl")
+        self.cost_path.parent.mkdir(parents=True, exist_ok=True)
 
     def _parameterize_openff(self, smiles: str, outdir: Path) -> None:
         """
@@ -104,36 +123,34 @@ class OpenMMEscalator:
             "run_dir": spark_run_dir,
             "system_xml": "system.xml",
             "positions_pdb": "positions.pdb",
-            "platform": self.cfg.platform,
-            "max_iterations": self.cfg.max_iterations,
+            "platform": self.platform,
+            "max_iterations": self.max_iterations,
         }
         task_id = self.gc.run(
             payload,
-            endpoint_id=self.cfg.spark_compute_ep,
-            function_id=self.cfg.openmm_function_id,
+            endpoint_id=self.spark_compute_ep,
+            function_id=self.openmm_function_id,
         )
         return task_id
 
     def _poll_result(self, task_id: str) -> Dict[str, Any]:
         t0 = time.time()
         last_log = 0.0
+        last = None
         while True:
             t = self.gc.get_task(task_id)
+            last = t
             if not t.get("pending", True):
                 break
-    
             elapsed = time.time() - t0
             if elapsed - last_log >= 10.0:  # log every 10s
                 logger.info("[OpenMM] poll | task_id=%s | status=%s | pending=%s | elapsed=%.1fs",
                             task_id, t.get("status"), t.get("pending"), elapsed)
                 last_log = elapsed
-    
-            if elapsed > self.cfg.timeout_s:
-                raise TimeoutError(f"OpenMM task {task_id} timed out after {self.cfg.timeout_s}s (status={t.get('status')})")
-    
-            time.sleep(self.cfg.poll_s)
-    
-        return self.gc.get_result(task_id)
+            if elapsed > self.timeout_s:
+                raise TimeoutError(f"OpenMM task {task_id} timed out after {self.timeout_s}s (status={t.get('status')})")
+            time.sleep(self.poll_s)
+        return self.gc.get_result(task_id), (last or {})
 
 
     def _poll_result_OLD(self, task_id: str) -> Dict[str, Any]:
@@ -142,37 +159,65 @@ class OpenMMEscalator:
             t = self.gc.get_task(task_id)
             if not t.get("pending", True):
                 break
-            if time.time() - t0 > self.cfg.timeout_s:
-                raise TimeoutError(f"OpenMM task {task_id} timed out after {self.cfg.timeout_s}s (status={t.get('status')})")
-            time.sleep(self.cfg.poll_s)
+            if time.time() - t0 > self.timeout_s:
+                raise TimeoutError(f"OpenMM task {task_id} timed out after {self.timeout_s}s (status={t.get('status')})")
+            time.sleep(self.poll_s)
         return self.gc.get_result(task_id)
 
     async def run(self, smiles: str) -> Dict[str, Any]:
         """
         Returns a structured result with timings + task ids.
         """
+        can = canonical_smiles(smiles)
+        # Cache key includes molecule + settings that affect output
+        cache_key = hashlib.sha1(
+            json.dumps(
+                {
+                    "smiles": can,
+                    "platform": self.platform,
+                    "max_iterations": self.max_iterations,
+                    "spark_compute_ep": self.spark_compute_ep,
+                    "openmm_function_id": self.openmm_function_id,
+                },
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()[:24]
+
+        if self.cache is not None:
+            hit = self.cache.get(cache_key)
+            if hit is not None:
+                logger.info("[OpenMM] cache hit | smiles=%s | key=%s", smiles, cache_key)
+                return {
+                    "ok": bool(hit.get("ok", False)),
+                    "smiles": smiles,
+                    "cache": {"hit": True, "key": cache_key},
+                    **hit,
+                }
         run_id = uuid.uuid4().hex[:16]
         logger.info("[OpenMM] %s | start | run_id=%s", smiles, run_id)
 
         local_dir = (self.stage_root / run_id).resolve()
         #src = str(local_dir) + "/"
-        spark_dir = f"{self.cfg.spark_base_dir}/{run_id}"
+        spark_dir = f"{self.spark_base_dir}/{run_id}"
 
         # 1) Parameterize locally
         logger.info("[OpenMM] %s | parameterize start | run_id=%s", smiles, run_id)
         t_param0 = time.time()
         try:
             self._parameterize_openff(smiles, local_dir)
-            #self._parameterize_openff(smiles, src)
         except Exception as e:
             logger.info("[OpenMM] %s | parameterize error | run_id=%s | %s", smiles, run_id, repr(e))
-            return {
+            fail = {
                 "ok": False,
                 "smiles": smiles,
                 "run_id": run_id,
                 "stage": "parameterize",
                 "error": repr(e),
+                "cache": {"hit": False, "key": cache_key},
             }
+            if self.cache is not None:
+                self.cache.set(cache_key, fail, meta={"canonical_smiles": can})
+            return fail
         t_param = time.time() - t_param0
         logger.info("[OpenMM] %s | parameterize done | run_id=%s | %.2fs", smiles, run_id, t_param)
 
@@ -182,27 +227,72 @@ class OpenMMEscalator:
         dst = spark_dir
 
         t_in0 = time.time()
-        tid_in = _globus_transfer(self.cfg.mac_transfer_ep, src, self.cfg.spark_transfer_ep, dst, recursive=True)
+        tid_in = _globus_transfer(self.mac_transfer_ep, src, self.spark_transfer_ep, dst, recursive=True)
         logger.info("[OpenMM] %s | transfer task created | run_id=%s | task_id=%s", smiles, run_id, tid_in)
-        print('XXXX', self.cfg.mac_transfer_ep, src, self.cfg.spark_transfer_ep, dst)
         _globus_wait(tid_in)
         t_in = time.time() - t_in0
         logger.info("[OpenMM] %s | transfer done | run_id=%s | task_id=%s | %.2fs", smiles, run_id, tid_in, t_in)
         logger.info("[OpenMM] %s | transfer done | run_id=%s | task=%s | %.2fs", smiles, run_id, tid_in, t_in)
 
         # 3) Compute minimize on Spark
-        t_gc0 = time.time()
+        submit_ts = time.time()
         task_id = self._submit_openmm(spark_dir)
         logger.info("[OpenMM] compute submit | run_id=%s | task_id=%s | spark_dir=%s", run_id, task_id, spark_dir)
-        result = self._poll_result(task_id)
-        t_gc = time.time() - t_gc0
+        result, task = self._poll_result(task_id)
+        logger.info("[OpenMM] compute result type=%s keys=%s", type(result), getattr(result, "keys", lambda: [])())
+        t_gc = time.time() - submit_ts
+    
+        details = (task.get("details") or {})
+        trans = (details.get("task_transitions") or {})
+        exec_start = trans.get("execution-start")
+        exec_end = trans.get("execution-end")
+        
+        queue_s = (exec_start - submit_ts) if (exec_start is not None) else None
+        exec_s = (exec_end - exec_start) if (exec_start is not None and exec_end is not None) else None
 
-        return {
+        final = {
             "ok": bool(result.get("ok", False)),
             "smiles": smiles,
             "run_id": run_id,
             "spark_run_dir": spark_dir,
+            "parameterize": {"elapsed_s": t_param},
             "transfer_in": {"task_id": tid_in, "elapsed_s": t_in},
             "compute": {"task_id": task_id, "elapsed_s": t_gc, "result": result},
-            "parameterize": {"elapsed_s": t_param},
+            "cache": {"hit": False, "key": cache_key},
         }
+        final["cost"] = {
+            "parameterize_s": t_param,
+            "transfer_in_s": t_in,
+            "compute_wall_s": t_gc,
+            "compute_queue_s": queue_s,
+            "compute_exec_s": exec_s,
+        }
+        final["compute"]["task_transitions"] = trans
+        final["compute"]["submit_ts"] = submit_ts
+
+        cost_rec = {
+            "ts": time.time(),
+            "smiles": smiles,
+            "run_id": run_id,
+            "spark_run_dir": spark_dir,
+            "transfer_task_in": tid_in,
+            "compute_task_id": task_id,
+            "parameterize_s": t_param,
+            "transfer_in_s": t_in,
+            "compute_wall_s": t_gc,
+            "compute_queue_s": queue_s,
+            "compute_exec_s": exec_s,
+            "platform": (result.get("platform") if isinstance(result, dict) else None),
+            "ok": bool(result.get("ok", False)) if isinstance(result, dict) else False,
+        }
+        with self.cost_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(cost_rec) + "\n")
+
+        if self.cache is not None:
+            self.cache.set(
+                cache_key,
+                final,
+                meta={"canonical_smiles": can},
+            )
+
+        return final
