@@ -17,8 +17,8 @@ def _run(cmd: list[str], cwd: Path, timeout_s: int | None = None) -> Dict[str, A
     return {
         "cmd": cmd,
         "returncode": p.returncode,
-        "stdout_tail": p.stdout[-8000:],
-        "stderr_tail": p.stderr[-8000:],
+        "stdout_tail": (p.stdout or "")[-8000:],
+        "stderr_tail": (p.stderr or "")[-8000:],
     }
 
 
@@ -79,7 +79,7 @@ def run_gromacs(payload: Dict[str, Any]) -> Dict[str, Any]:
     grompp_res = _run(grompp_cmd, cwd=work_dir, timeout_s=900)
     grompp_s = time.time() - t_grompp0
     if grompp_res["returncode"] != 0:
-        return {"ok": False, "run_id": run_id, "stage": "grompp", "detail": grompp_res}
+        return {"ok": False, "run_id": run_id, "stage": "grompp", "error": "grompp_failed", "detail": grompp_res}
 
     # 2) mdrun
     deffnm = m.get("deffnm", "run")
