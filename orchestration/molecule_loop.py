@@ -67,6 +67,9 @@ async def escalate_gromacs(ctx, accepted, top_k: int):
     for m in ranked:
         logger.info("[GROMACS] call start | smiles=%s", m["smiles"])
         res = await ctx["gromacs_escalate"](m["smiles"])
+        if isinstance(res, dict) and not res.get("ok"):
+            detail = res.get("detail", {})
+            logger.info("[GROMACS] stderr_tail=%s", (detail.get("stderr_tail") or "")[:500])
         m["gromacs"] = res
         logger.info(
             "[GROMACS] call done  | smiles=%s | ok=%s | stage=%s | error=%s",

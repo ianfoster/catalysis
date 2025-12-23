@@ -46,7 +46,6 @@ def run_gromacs(payload: Dict[str, Any]) -> Dict[str, Any]:
       }
     }
     """
-    print('XXXXX', payload)
     run_id = payload["run_id"]
     run_dir = Path(payload["run_dir"]).resolve()
     in_dir = run_dir / "input"
