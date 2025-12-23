@@ -158,6 +158,7 @@ async def main() -> int:
         perf = await manager.launch(PerformanceSkill)
         econ = await manager.launch(EconomicsSkill)
         mk = await manager.launch(MicrokineticSkill)
+        rdk = await manager.launch(RDKitSkill)
     
         # Build tool list first (local tools always available)
         tools = []
@@ -165,6 +166,7 @@ async def main() -> int:
         tools.extend(make_performance_tools(perf))
         tools.extend(make_economics_tools(econ))
         tools.extend(make_microkinetic_tools(mk))
+        tools.extend(make_rdkit_tools(rdk))
     
         # Try to enable GC only if requested
         gc_available = False
@@ -209,6 +211,7 @@ async def main() -> int:
             "estimate_catalyst_cost": lambda **kw: call_tool("estimate_catalyst_cost", **kw),
             "microkinetic_lite": lambda **kw: call_tool("microkinetic_lite", **kw),
         }
+        ctx["rdkit_descriptors"] = lambda **kw: call_tool("rdkit_descriptors", **kw)
     
         if have_gc_tools:
             ctx["submit_characterization"] = lambda **kw: call_tool("submit_characterization", **kw)

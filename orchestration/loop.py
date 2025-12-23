@@ -29,6 +29,9 @@ def choose_characterizers(candidate: dict, history_for_candidate: Dict[str, Any]
       - if promising and still uncertain, escalate to microkinetic_lite
       - if very promising, escalate to dft_adsorption
     """
+    if "rdkit_descriptors" not in history_for_candidate:
+        return ["rdkit_descriptors"]
+
     if "fast_surrogate" not in history_for_candidate:
         return ["fast_surrogate"]
 

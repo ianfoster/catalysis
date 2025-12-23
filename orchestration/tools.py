@@ -12,6 +12,7 @@ from skills.catalyst import CatalystSkill
 from skills.performance import PerformanceSkill
 from skills.hpc_characterizer import HPCCharacterizerSkill
 from skills.microkinetic import MicrokineticSkill
+from skills.rdkit_skill import RDKitSkill
 
 
 def make_microkinetic_tools(mk: Handle[MicrokineticSkill]) -> list[BaseTool]:
@@ -21,6 +22,15 @@ def make_microkinetic_tools(mk: Handle[MicrokineticSkill]) -> list[BaseTool]:
         return await mk.microkinetic_lite({"candidate": candidate, "performance": performance})
 
     return [microkinetic_lite]
+
+
+def make_rdkit_tools(rdkit: Handle[RDKitSkill]) -> List[BaseTool]:
+    @tool
+    async def rdkit_descriptors(smiles: str) -> dict:
+        """Compute RDKit descriptors for a SMILES string."""
+        return await rdkit.descriptors({"smiles": smiles})
+
+    return [rdkit_descriptors]
 
 
 def make_chemistry_tools(chem: Handle[ChemistrySkill]) -> List[BaseTool]:
