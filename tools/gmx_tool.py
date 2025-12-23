@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 from typing import Any, Dict
+import time
 
 
 def _run(cmd: list[str], cwd: Path, timeout_s: int | None = None) -> Dict[str, Any]:

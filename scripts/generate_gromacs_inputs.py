@@ -1,35 +1,36 @@
-#!/usr/bin/env python3
+q#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+import sys
 from pathlib import Path
+from typing import Any, Dict, List, Tuple
 
-# OpenFF
 from openff.toolkit.topology import Molecule, Topology
 from openff.toolkit.typing.engines.smirnoff import ForceField
-
-# Interchange
 from openff.interchange import Interchange
 
 
-def mol_id_from_smiles(smiles: str) -> str:
-    # stable ID from canonical SMILES (fallback to raw)
+def canonical_smiles(smiles: str) -> str:
     try:
         from rdkit import Chem
         m = Chem.MolFromSmiles(smiles)
         if m is None:
-            can = smiles
-        else:
-            can = Chem.MolToSmiles(m, canonical=True)
+            return smiles
+        return Chem.MolToSmiles(m, canonical=True)
     except Exception:
-        can = smiles
+        return smiles
+
+
+def mol_id_from_smiles(smiles: str) -> str:
+    can = canonical_smiles(smiles)
     return hashlib.sha1(can.encode("utf-8")).hexdigest()[:16]
 
 
-def write_default_mdp(outdir: Path, name: str = "md.mdp") -> None:
-    # Short, safe demo MDP (small cutoffs, no PME) to avoid box issues
+def write_default_mdp(outdir: Path) -> None:
+    # Conservative settings that should grompp cleanly for a single molecule in a big box.
     mdp = """\
 integrator      = md
 nsteps          = 500
@@ -63,11 +64,10 @@ gen_vel         = yes
 gen_temp        = 300
 gen_seed        = 42
 """
-    (outdir / name).write_text(mdp, encoding="utf-8")
+    (outdir / "md.mdp").write_text(mdp, encoding="utf-8")
 
 
 def force_box_in_gro(gro_path: Path, box_nm: float = 3.0) -> None:
-    # Ensure last line has a valid cubic box; grompp will complain otherwise.
     lines = gro_path.read_text(encoding="utf-8").splitlines()
     if len(lines) < 3:
         return
@@ -75,75 +75,85 @@ def force_box_in_gro(gro_path: Path, box_nm: float = 3.0) -> None:
     gro_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def export_to_gromacs(interchange: Interchange, outdir: Path) -> dict:
+def export_gromacs(interchange: Interchange, outdir: Path) -> Dict[str, Any]:
     """
-    Export to GROMACS files in outdir.
-
-    Interchange API differs across versions. Try multiple signatures.
+    Robustly export GROMACS files across Interchange API variants.
+    Returns export metadata for debugging.
     """
     outdir.mkdir(parents=True, exist_ok=True)
-    errors = []
+    attempts: List[Tuple[str, str]] = []
 
-    # 1) method-based exports (various versions)
+    # Try method-based API variants
     if hasattr(interchange, "to_gromacs"):
-        for desc, fn in [
-            ("to_gromacs(prefix, output_dir)", lambda: interchange.to_gromacs(prefix="topol", output_dir=str(outdir))),
-            ("to_gromacs(output_dir)",        lambda: interchange.to_gromacs(str(outdir))),
-            ("to_gromacs(output_dir, prefix)",lambda: interchange.to_gromacs(str(outdir), prefix="topol")),
-        ]:
+        variants = [
+            ("method: to_gromacs(prefix='topol', output_dir=...)", lambda: interchange.to_gromacs(prefix="topol", output_dir=str(outdir))),
+            ("method: to_gromacs(output_dir=...)",               lambda: interchange.to_gromacs(str(outdir))),
+            ("method: to_gromacs(output_dir=..., prefix='topol')",lambda: interchange.to_gromacs(str(outdir), prefix="topol")),
+        ]
+        for desc, fn in variants:
             try:
                 ret = fn()
                 return {"api": desc, "ret": str(ret)}
             except Exception as e:
-                errors.append(f"{desc}: {type(e).__name__}: {e}")
+                attempts.append((desc, f"{type(e).__name__}: {e}"))
 
-    # 2) functional export path (some versions)
+    # Try functional exporter if present
     try:
         from openff.interchange.interop.gromacs.export import to_gromacs  # type: ignore
-        try:
-            ret = to_gromacs(interchange, prefix="topol", output_dir=str(outdir))
-            return {"api": "interop.to_gromacs(prefix, output_dir)", "ret": str(ret)}
-        except Exception as e:
-            errors.append(f"interop.to_gromacs(prefix, output_dir): {type(e).__name__}: {e}")
-
-        try:
-            ret = to_gromacs(interchange, str(outdir))
-            return {"api": "interop.to_gromacs(output_dir)", "ret": str(ret)}
-        except Exception as e:
-            errors.append(f"interop.to_gromacs(output_dir): {type(e).__name__}: {e}")
+        variants2 = [
+            ("func: to_gromacs(interchange, prefix='topol', output_dir=...)", lambda: to_gromacs(interchange, prefix="topol", output_dir=str(outdir))),
+            ("func: to_gromacs(interchange, output_dir=...)",                 lambda: to_gromacs(interchange, str(outdir))),
+        ]
+        for desc, fn in variants2:
+            try:
+                ret = fn()
+                return {"api": desc, "ret": str(ret)}
+            except Exception as e:
+                attempts.append((desc, f"{type(e).__name__}: {e}"))
     except Exception as e:
-        errors.append(f"import interop exporter failed: {type(e).__name__}: {e}")
+        attempts.append(("import: openff.interchange.interop.gromacs.export.to_gromacs", f"{type(e).__name__}: {e}"))
 
-    raise RuntimeError("Could not export to GROMACS. Attempts:\n  - " + "\n  - ".join(errors))
+    raise RuntimeError("GROMACS export failed. Attempts:\n" + "\n".join([f"- {d}: {msg}" for d, msg in attempts]))
 
 
-def export_to_gromacs_OLD(interchange: Interchange, outdir: Path) -> dict:
+def normalize_outputs(outdir: Path) -> Dict[str, str]:
     """
-    Export to GROMACS files in outdir.
-
-    We try a couple of Interchange export APIs because they vary across versions.
-    Returns dict with paths for debugging.
+    Ensure we end with:
+      outdir/system.gro
+      outdir/topol.top
+    even if exporter wrote different names.
     """
-    outdir.mkdir(parents=True, exist_ok=True)
+    # topology
+    if (outdir / "topol.top").exists():
+        top = outdir / "topol.top"
+    else:
+        tops = list(outdir.glob("*.top")) + list(outdir.glob("*.topol")) + list(outdir.glob("*.itp"))  # defensive
+        # exporters should produce .top or topol.top; if not, we error explicitly below
+        top = outdir / "topol.top"
+        # If a .top exists, prefer it
+        for cand in list(outdir.glob("*.top")):
+            cand.rename(outdir / "topol.top")
+            top = outdir / "topol.top"
+            break
 
-    # Try method-based export first
-    if hasattr(interchange, "to_gromacs"):
-        # Some versions: to_gromacs(prefix, output_dir)
-        try:
-            ret = interchange.to_gromacs(prefix="topol", output_dir=str(outdir))
-            return {"api": "interchange.to_gromacs", "ret": str(ret)}
-        except TypeError:
-            # Some versions: to_gromacs(path)
-            ret = interchange.to_gromacs(str(outdir))
-            return {"api": "interchange.to_gromacs", "ret": str(ret)}
+    # coordinates
+    if (outdir / "system.gro").exists():
+        gro = outdir / "system.gro"
+    else:
+        gros = list(outdir.glob("*.gro"))
+        if gros:
+            gros[0].rename(outdir / "system.gro")
+            gro = outdir / "system.gro"
+        else:
+            gro = outdir / "system.gro"
 
-    # Try functional export path
-    try:
-        from openff.interchange.interop.gromacs.export import to_gromacs  # type: ignore
-        ret = to_gromacs(interchange, prefix="topol", output_dir=str(outdir))
-        return {"api": "openff.interchange.interop.gromacs.export.to_gromacs", "ret": str(ret)}
-    except Exception as e:
-        raise RuntimeError(f"Could not export to GROMACS with this Interchange build: {e!r}")
+    # Final validation
+    if not (outdir / "topol.top").exists():
+        raise RuntimeError(f"Exporter did not produce topol.top (files={sorted([p.name for p in outdir.iterdir()])})")
+    if not (outdir / "system.gro").exists():
+        raise RuntimeError(f"Exporter did not produce system.gro (files={sorted([p.name for p in outdir.iterdir()])})")
+
+    return {"topol.top": str((outdir / "topol.top").resolve()), "system.gro": str((outdir / "system.gro").resolve())}
 
 
 def main() -> int:
@@ -155,75 +165,57 @@ def main() -> int:
     args = ap.parse_args()
 
     smiles = args.smiles
+    can = canonical_smiles(smiles)
     mol_id = mol_id_from_smiles(smiles)
 
     outdir = Path(args.out_root).resolve() / mol_id
     outdir.mkdir(parents=True, exist_ok=True)
 
-    # 1) Build OpenFF molecule + conformer
-    mol = Molecule.from_smiles(smiles)
-    mol.generate_conformers(n_conformers=1)
-    top = Topology.from_molecules([mol])
-
-    # 2) ForceField -> Interchange
-    ff = ForceField(args.forcefield)
-    interchange = Interchange.from_smirnoff(ff, top)
-
-    # 3) Export to GROMACS
-    export_info = export_to_gromacs(interchange, outdir)
-
-    # The export should create a topology + coordinate file.
-    # Common names:
-    # - topol.top
-    # - topol.gro
-    # Some builds output conf.gro; we normalize.
-    gro_candidates = list(outdir.glob("*.gro"))
-    top_candidates = list(outdir.glob("*.top"))
-
-    if not top_candidates:
-        # Sometimes it writes topol.top directly
-        if not (outdir / "topol.top").exists():
-            raise RuntimeError(f"No .top/.topol.top written in {outdir} (files={list(outdir.iterdir())})")
-
-    # Normalize names
-    if (outdir / "topol.top").exists():
-        topol_top = outdir / "topol.top"
-    elif top_candidates:
-        topol_top = top_candidates[0]
-        topol_top.rename(outdir / "topol.top")
-        topol_top = outdir / "topol.top"
-    else:
-        topol_top = outdir / "topol.top"
-
-    if (outdir / "system.gro").exists():
-        system_gro = outdir / "system.gro"
-    elif gro_candidates:
-        gro_candidates[0].rename(outdir / "system.gro")
-        system_gro = outdir / "system.gro"
-    else:
-        raise RuntimeError(f"No .gro written in {outdir} (files={list(outdir.iterdir())})")
-
-    # Force a safe box size
-    force_box_in_gro(system_gro, box_nm=float(args.box_nm))
-
-    # 4) Write mdp
-    write_default_mdp(outdir, "md.mdp")
-
-    meta = {
+    meta: Dict[str, Any] = {
+        "ok": False,
         "smiles": smiles,
+        "canonical_smiles": can,
         "mol_id": mol_id,
         "forcefield": args.forcefield,
         "outdir": str(outdir),
-        "export": export_info,
-        "files": {
-            "topol": str(topol_top),
-            "gro": str(system_gro),
-            "mdp": str(outdir / "md.mdp"),
-        },
+        "files": {},
+        "export": {},
+        "error": None,
     }
+
+    try:
+        mol = Molecule.from_smiles(smiles)
+        mol.generate_conformers(n_conformers=1)
+        top = Topology.from_molecules([mol])
+
+        ff = ForceField(args.forcefield)
+        interchange = Interchange.from_smirnoff(ff, top)
+
+        meta["export"] = export_gromacs(interchange, outdir)
+
+        files = normalize_outputs(outdir)
+        force_box_in_gro(Path(files["system.gro"]), box_nm=float(args.box_nm))
+        write_default_mdp(outdir)
+
+        # required files check
+        required = ["md.mdp", "system.gro", "topol.top"]
+        missing = [f for f in required if not (outdir / f).exists()]
+        if missing:
+            raise RuntimeError(f"Missing required files after export: {missing}")
+
+        meta["files"] = {
+            "mdp": str((outdir / "md.mdp").resolve()),
+            "gro": str((outdir / "system.gro").resolve()),
+            "top": str((outdir / "topol.top").resolve()),
+        }
+        meta["ok"] = True
+
+    except Exception as e:
+        meta["error"] = repr(e)
+
     (outdir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     print(json.dumps(meta, indent=2))
-    return 0
+    return 0 if meta["ok"] else 2
 
 
 if __name__ == "__main__":

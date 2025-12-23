@@ -3,14 +3,29 @@ import uuid
 import logging
 from pathlib import Path
 from typing import Dict, Any
+import subprocess
+
 from orchestration.escalators.base import BaseEscalator
 from orchestration.ids import mol_id_from_smiles
 
 logger = logging.getLogger(__name__)
 
-import subprocess
-
 OPENFF311_PY = "/Users/ian/anaconda3/envs/openff311/bin/python"  # adjust if needed
+
+def _gen_gmx_inputs(smiles: str) -> dict:
+    p = subprocess.run(
+        [OPENFF311_PY, "scripts/generate_gromacs_inputs.py", "--smiles", smiles],
+        capture_output=True,
+        text=True,
+    )
+    # script prints JSON manifest
+    try:
+        manifest = json.loads(p.stdout) if p.stdout else {"ok": False, "error": "no stdout"}
+    except Exception:
+        manifest = {"ok": False, "error": "bad_json", "stdout_tail": p.stdout[-2000:], "stderr_tail": p.stderr[-2000:]}
+    manifest["returncode"] = p.returncode
+    return manifest
+
 
 def generate_gromacs_inputs(smiles: str) -> None:
     # Run the generator script in the openff311 environment
@@ -31,6 +46,9 @@ class GromacsEscalator(BaseEscalator):
         spark_base_dir: str,
         transfer_to_spark,
         transfer_from_spark,
+        ntomp: int = 8,
+        ntmpi: int = 1,
+        gpu: bool = True,
     ):
         super().__init__(
             gc_client=gc_client,
@@ -42,6 +60,9 @@ class GromacsEscalator(BaseEscalator):
         self.function_id = gmx_function_id
         self.spark_compute_ep = spark_compute_ep
         self.spark_base = Path(spark_base_dir)
+        self.ntomp = ntomp
+        self.ntmpi = ntmpi
+        self.gpu = gpu
         self.tx_to = transfer_to_spark
         self.tx_from = transfer_from_spark
 
@@ -53,17 +74,15 @@ class GromacsEscalator(BaseEscalator):
         run_id = uuid.uuid4().hex[:16]
         mol_id = mol_id_from_smiles(smiles)
         local_in = (Path("data/gromacs_inputs") / mol_id).resolve()
-        spark_run = self.spark_base / run_id
+        spark_run = Path(self.spark_base) / run_id
         spark_in = spark_run / "input"
         spark_out = spark_run / "output"
 
         if not local_in.exists():
-            if not local_in.exists():
-                logger.info("[GROMACS] inputs missing; generating | smiles=%s | dir=%s", smiles, local_in)
-                try:
-                    generate_gromacs_inputs(smiles)
-                except Exception as e:
-                    return {"ok": False, "stage": "generate_inputs", "error": repr(e)}
+            logger.info("[GROMACS] inputs missing; generating | smiles=%s | dir=%s", smiles, local_in)
+            manifest = _gen_gmx_inputs(smiles)
+            if not manifest.get("ok"):
+                return {"ok": False, "stage": "generate_inputs", "error": manifest.get("error"), "manifest": manifest}
 
             # re-check
             if not local_in.exists():
@@ -82,11 +101,33 @@ class GromacsEscalator(BaseEscalator):
 
         # ---- submit compute ----
         payload = {
-            "run_id": str(run_id), # XXXX
+            "run_id": run_id,
             "run_dir": str(spark_run),
+
+            "grompp": {
+                "mdp": "md.mdp",         # must exist in spark_run/input/
+                "gro": "system.gro",     # must exist in spark_run/input/
+                "top": "topol.top",      # must exist in spark_run/input/
+                "tpr": "run.tpr",        # will be written in work dir (see gmx_tool implementation)
+                "maxwarn": 1,
+            },
+
+            "mdrun": {
+                "deffnm": "run",
+                "ntomp": int(self.ntomp),   # or a constant, e.g. 8
+                "ntmpi": int(self.ntmpi),   # or 1
+                "gpu": bool(self.gpu),      # True/False depending on Spark setup
+            },
+
+            # optional but recommended if your gmx_tool supports them
             "input_dir": str(spark_in),
+            #"work_dir": str(spark_work),
             "output_dir": str(spark_out),
         }
+
+        logger.info("[GROMACS] submit payload keys=%s", sorted(payload.keys()))
+        logger.info("[GROMACS] grompp=%s", payload["grompp"])
+        logger.info("[GROMACS] mdrun=%s", payload["mdrun"])
 
         t_gc0 = time.time()
         task_id = self.gc.run(

@@ -95,6 +95,9 @@ async def main() -> int:
     ap.add_argument("--gmx-k", type=int, default=0)
     ap.add_argument("--gmx-function-id", type=str)
     ap.add_argument("--gmx-spark-dir", default="/home/ian/gmx-mol-runs")
+    ap.add_argument("--gmx-ntomp", type=int, default=8)
+    ap.add_argument("--gmx-ntmpi", type=int, default=1)
+    ap.add_argument("--no-gmx-gpu", action="store_true")
     args = ap.parse_args()
 
     level = getattr(logging, args.log_level.upper(), logging.INFO)
@@ -157,24 +160,6 @@ async def main() -> int:
             _globus_wait(tid)
             return tid
 
-        def globus_transfer_to_spark_OLD(local_path: str, spark_path: str) -> str:
-            return _globus_transfer(
-                src_ep=args.mac_transfer_ep,
-                src_path=local_path,
-                dst_ep=args.spark_transfer_ep,
-                dst_path=spark_path,
-                recursive=True,
-            )
-
-        def globus_transfer_from_spark_OLD(spark_path: str, local_path: str) -> str:
-            return _globus_transfer(
-                src_ep=args.spark_transfer_ep,
-                src_path=spark_path,
-                dst_ep=args.mac_transfer_ep,
-                dst_path=local_path,
-                recursive=True,
-            )
-
         if args.openmm_k > 0:
             if not args.openmm_function_id:
                 raise RuntimeError("--openmm-k set but --openmm-function-id not provided")
@@ -202,6 +187,9 @@ async def main() -> int:
                 spark_base_dir=args.gmx_spark_dir,
                 transfer_to_spark=globus_transfer_to_spark,
                 transfer_from_spark=globus_transfer_from_spark,
+                ntomp=args.gmx_ntomp,
+                ntmpi=args.gmx_ntmpi,
+                gpu=not args.no_gmx_gpu,
             )
             ctx["gromacs_escalate"] = gmx.run
 
