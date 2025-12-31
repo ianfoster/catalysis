@@ -10,8 +10,11 @@ Usage:
     python app_generator.py [options]
 
 Examples:
-    # Basic run with defaults
+    # Basic run with defaults (local)
     python app_generator.py
+
+    # Connect to Academy agents on Spark
+    python app_generator.py --exchange-url http://spark:8080 --llm-url http://spark:8000/v1
 
     # Custom iterations and candidates per batch
     python app_generator.py --max-iterations 10 --candidates-per-iteration 8
@@ -141,7 +144,25 @@ def parse_args() -> argparse.Namespace:
         help="Start fresh, ignore existing checkpoint",
     )
 
-    # Globus Compute (optional)
+    # Academy exchange (for connecting to remote agents)
+    p.add_argument(
+        "--exchange-url",
+        default=None,
+        help="Academy HTTP exchange URL (e.g., http://spark:8080)",
+    )
+    p.add_argument(
+        "--redis-host",
+        default=None,
+        help="Redis hostname for distributed exchange (e.g., spark)",
+    )
+    p.add_argument(
+        "--redis-port",
+        type=int,
+        default=6379,
+        help="Redis port (default: 6379)",
+    )
+
+    # Globus Compute (optional, alternative to Academy)
     p.add_argument(
         "--gc-endpoint-cheap",
         default=None,
@@ -256,11 +277,24 @@ async def main() -> int:
     logger.info("Generator config: %s", generator_config)
     logger.info("Shepherd config: %s", shepherd_config)
 
+    # Create exchange factory (local, Redis, or HTTP)
+    if args.redis_host:
+        from academy.exchange import RedisExchangeFactory
+        exchange_factory = RedisExchangeFactory(hostname=args.redis_host, port=args.redis_port)
+        logger.info("Using Redis exchange: %s:%d", args.redis_host, args.redis_port)
+    elif args.exchange_url:
+        from academy.exchange import HttpExchangeFactory
+        exchange_factory = HttpExchangeFactory(url=args.exchange_url)
+        logger.info("Using HTTP exchange: %s", args.exchange_url)
+    else:
+        exchange_factory = LocalExchangeFactory()
+        logger.info("Using local exchange")
+
     # Create Manager and launch GeneratorAgent
     logger.info("Starting GeneratorAgent...")
 
     try:
-        async with await Manager.from_exchange_factory(LocalExchangeFactory()) as manager:
+        async with await Manager.from_exchange_factory(exchange_factory) as manager:
             generator = await manager.launch(
                 GeneratorAgent,
                 kwargs={

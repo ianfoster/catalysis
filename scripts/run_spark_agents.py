@@ -128,6 +128,8 @@ async def run_agents(
     budget: float,
     device: str = "cpu",
     exchange_url: str | None = None,
+    redis_host: str | None = None,
+    redis_port: int = 6379,
 ):
     """Run Academy agents on Spark.
 
@@ -152,11 +154,15 @@ async def run_agents(
     logging.info(f"  Shepherds: {num_shepherds}")
     logging.info(f"  Device: {device}")
 
-    # Create exchange factory
-    if exchange_url:
-        from academy.exchange.cloud import CloudExchangeFactory
-        exchange_factory = CloudExchangeFactory(url=exchange_url)
-        logging.info(f"  Exchange: cloud ({exchange_url})")
+    # Create exchange factory (local, Redis, or HTTP)
+    if redis_host:
+        from academy.exchange import RedisExchangeFactory
+        exchange_factory = RedisExchangeFactory(hostname=redis_host, port=redis_port)
+        logging.info(f"  Exchange: Redis ({redis_host}:{redis_port})")
+    elif exchange_url:
+        from academy.exchange import HttpExchangeFactory
+        exchange_factory = HttpExchangeFactory(url=exchange_url)
+        logging.info(f"  Exchange: HTTP ({exchange_url})")
     else:
         exchange_factory = LocalExchangeFactory()
         logging.info("  Exchange: local (in-memory)")
@@ -348,7 +354,18 @@ Examples:
     )
     parser.add_argument(
         "--exchange-url",
-        help="Academy exchange URL (for cloud mode)",
+        help="Academy HTTP exchange URL (for cloud mode)",
+    )
+    parser.add_argument(
+        "--redis-host",
+        default=None,
+        help="Redis hostname for distributed exchange (e.g., localhost)",
+    )
+    parser.add_argument(
+        "--redis-port",
+        type=int,
+        default=6379,
+        help="Redis port (default: 6379)",
     )
     parser.add_argument(
         "--config",
@@ -404,6 +421,8 @@ Examples:
             budget=args.budget,
             device=args.device,
             exchange_url=args.exchange_url,
+            redis_host=args.redis_host,
+            redis_port=args.redis_port,
         ))
 
 
