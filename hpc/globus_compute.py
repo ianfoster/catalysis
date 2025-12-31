@@ -32,53 +32,53 @@ class GlobusComputeAdapter:
     def get_task(self, task_id: str) -> Dict[str, Any]:
         return self.gc.get_task(task_id)
 
-def try_result(self, task_id: str) -> Dict[str, Any]:
-    t = self.gc.get_task(task_id)
+    def try_result(self, task_id: str) -> Dict[str, Any]:
+        t = self.gc.get_task(task_id)
 
-    pending = t.get("pending", None)
-    status_raw = (t.get("status") or "").lower()
-    details = self._task_details(t)
+        pending = t.get("pending", None)
+        status_raw = (t.get("status") or "").lower()
+        details = self._task_details(t)
 
-    # SUCCEEDED
-    if pending is False and status_raw in ("success", "succeeded"):
+        # SUCCEEDED
+        if pending is False and status_raw in ("success", "succeeded"):
+            return {
+                "task_id": task_id,
+                "status": "SUCCEEDED",
+                "result": t.get("result"),
+                "details": details,
+                "pending": False,
+                "raw_status": status_raw,
+                "completion_t": t.get("completion_t"),
+            }
+
+        # FAILED
+        if pending is False and status_raw in ("failed", "failure", "error"):
+            return {
+                "task_id": task_id,
+                "status": "FAILED",
+                "error": t.get("exception") or t.get("details") or t,
+                "details": details,
+                "pending": False,
+                "raw_status": status_raw,
+                "completion_t": t.get("completion_t"),
+            }
+
+        # PENDING / RUNNING
+        if pending is True:
+            # Some deployments report "pending", "waiting-for-ep", "running", etc.
+            return {
+                "task_id": task_id,
+                "status": "PENDING",
+                "details": details,
+                "pending": True,
+                "raw_status": status_raw,
+            }
+
+        # Fallback (unknown shape)
         return {
             "task_id": task_id,
-            "status": "SUCCEEDED",
-            "result": t.get("result"),
+            "status": status_raw.upper() or "UNKNOWN",
             "details": details,
-            "pending": False,
-            "raw_status": status_raw,
-            "completion_t": t.get("completion_t"),
-        }
-
-    # FAILED
-    if pending is False and status_raw in ("failed", "failure", "error"):
-        return {
-            "task_id": task_id,
-            "status": "FAILED",
-            "error": t.get("exception") or t.get("details") or t,
-            "details": details,
-            "pending": False,
-            "raw_status": status_raw,
-            "completion_t": t.get("completion_t"),
-        }
-
-    # PENDING / RUNNING
-    if pending is True:
-        # Some deployments report "pending", "waiting-for-ep", "running", etc.
-        return {
-            "task_id": task_id,
-            "status": "PENDING",
-            "details": details,
-            "pending": True,
+            "pending": pending,
             "raw_status": status_raw,
         }
-
-    # Fallback (unknown shape)
-    return {
-        "task_id": task_id,
-        "status": status_raw.upper() or "UNKNOWN",
-        "details": details,
-        "pending": pending,
-        "raw_status": status_raw,
-    }

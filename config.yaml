@@ -10,8 +10,124 @@ paths:
   cache_jsonl: data/char_cache.jsonl
 
 globus_compute:
-  enabled: false
-  endpoint_id: null
+  enabled: true
+  endpoint_id: "cee14c1d-100c-417b-9049-8c8914f3ff56"
   functions:
-    fast_surrogate: null
-    microkinetic_lite: null
+    fast_surrogate: "a64cde73-88cf-47bf-baaf-e7b39b69f1a9"
+    microkinetic_lite: "f33dddfc-5b07-44dd-ab62-10686bdfe6d7"
+    stability_analysis: "216e4249-c075-4fad-a5c4-940fb8c94d06"
+    ml_screening: "fe73623c-20c3-40ce-adc5-f50352635b94"
+    ml_relaxation: "0dafffcc-353c-481b-aa46-238a181dc5c1"
+    ml_m3gnet: "fa687f12-4eb3-4050-ae3c-1462b7b3efa2"
+    dft_adsorption: "a047e546-5ad8-4a9f-b7a5-407c28b6c89f"
+    dft_gpaw: "aac2b590-10bc-4869-8cd8-b37ead8d6cf4"
+    dft_qe: "12d2606a-36e0-4351-873b-4d5249129d13"
+    microkinetic_catmap: "1dcff9c9-d11c-4297-a807-8de6a85dcc84"
+    cantera_reactor: "c2537b1d-a273-40f2-8ece-88161a2c98e0"
+    cantera_sensitivity: "a7f7f2d7-8873-4074-b5a5-86e4e37ec011"
+    openmm_relaxation: "3e412947-a76f-41b1-b565-7cf4a8110768"
+    gromacs_md: "92f7a01d-82b2-43ed-8777-ea66eb820767"
+
+shepherd:
+  llm:
+    mode: "shared"  # "shared" or "local"
+    model: "meta-llama/Llama-3-8B-Instruct"
+    shared_url: "http://localhost:8000/v1"
+    local_url: "http://localhost:8000/v1"
+    api_key_env: null  # Optional: env var name for API key
+
+  budget:
+    default: 100.0
+    max: 1000.0
+
+  cache:
+    enabled: true
+    path: "data/shepherd_cache.jsonl"
+
+  endpoints:
+    cheap: "cee14c1d-100c-417b-9049-8c8914f3ff56"
+    gpu: "cee14c1d-100c-417b-9049-8c8914f3ff56"
+
+  timeouts:
+    llm_call: 30
+    test_poll_interval: 1.0
+    test_max_wait: 7200
+
+generator:
+  llm:
+    mode: "shared"  # "shared" (same as shepherd) or "separate"
+    model: "meta-llama/Llama-3-70B-Instruct"  # Can use larger model
+    shared_url: "http://localhost:8000/v1"
+    local_url: "http://localhost:8000/v1"
+    api_key_env: null
+
+  generation:
+    candidates_per_iteration: 6
+    max_iterations: 20
+
+  convergence:
+    patience: 3              # Stop if no improvement for N iterations
+    min_improvement: 0.01    # Minimum score improvement to count
+    llm_judgment: true       # Also ask LLM about convergence
+
+  shepherd:
+    budget_per_candidate: 100.0
+    max_concurrent_shepherds: 10
+    timeout: 3600
+
+  state:
+    checkpoint_path: "data/generator_state.json"
+    results_path: "data/generator_results.jsonl"
+
+# Academy agent-based architecture
+academy:
+  enabled: true
+
+  # Exchange for agent communication
+  exchange:
+    type: "cloud"  # "cloud" or "local" (in-memory)
+    url: null  # Set to Academy exchange URL if using cloud
+
+  # LLM configuration for Spark
+  llm:
+    # Backend: "vllm" (recommended for GB10) or "llama-cpp"
+    backend: "vllm"
+
+    # vLLM settings (recommended for DGX Spark GB10)
+    # Start server: python scripts/start_vllm_server.py --model <model>
+    vllm:
+      container: "nvcr.io/nvidia/vllm:25.11-py3"
+      enforce_eager: true  # Required for GB10!
+      trust_remote_code: true
+      port: 8000
+      # Recommended models (with FP8 for better speed):
+      # - meta-llama/Llama-3.1-8B-Instruct
+      # - neuralmagic/Meta-Llama-3.1-8B-Instruct-FP8-dynamic (94 tok/s)
+      # - Qwen/Qwen3-14B-FP8 (12.7 tok/s)
+      # - Qwen/Qwen3-30B-A3B-FP8 (37 tok/s, MoE)
+      model: "meta-llama/Llama-3.1-8B-Instruct"
+
+    # llama-cpp settings (alternative)
+    llama_cpp:
+      model_path: "/path/to/llama-3-8b-instruct.Q4_K_M.gguf"
+      n_ctx: 8192
+      n_gpu_layers: -1
+      chat_format: "llama-3"
+      port: 8080
+
+  # Simulation Agents on Spark
+  sim_agent:
+    available_codes:
+      - mace
+      - chgnet
+      - quantum_espresso
+      - cantera
+      - openmm
+      - surrogate
+      - stability
+
+  # ShepherdAgent spawning
+  shepherds:
+    num_concurrent: 4  # Number of ShepherdAgents to run in parallel
+    budget_per_candidate: 100.0
+    timeout: 3600
