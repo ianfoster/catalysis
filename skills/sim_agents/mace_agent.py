@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from academy import Agent, action
+from academy.agent import Agent, action
 
 logger = logging.getLogger(__name__)
 

@@ -51,15 +51,19 @@ sys.path.insert(0, str(project_root))
 import yaml
 
 
-# Map of agent names to their classes
+# Map of agent names to their classes (11 agents total)
 AGENT_CLASSES = {
     "mace": ("skills.sim_agents.mace_agent", "MACEAgent"),
     "chgnet": ("skills.sim_agents.chgnet_agent", "CHGNetAgent"),
+    "m3gnet": ("skills.sim_agents.m3gnet_agent", "M3GNetAgent"),
     "cantera": ("skills.sim_agents.cantera_agent", "CanteraAgent"),
     "stability": ("skills.sim_agents.stability_agent", "StabilityAgent"),
     "surrogate": ("skills.sim_agents.surrogate_agent", "SurrogateAgent"),
     "qe": ("skills.sim_agents.qe_agent", "QEAgent"),
+    "gpaw": ("skills.sim_agents.gpaw_agent", "GPAWAgent"),
     "openmm": ("skills.sim_agents.openmm_agent", "OpenMMAgent"),
+    "gromacs": ("skills.sim_agents.gromacs_agent", "GROMACSAgent"),
+    "catmap": ("skills.sim_agents.catmap_agent", "CatMAPAgent"),
 }
 
 
@@ -136,7 +140,8 @@ async def run_agents(
         device: Compute device for ML agents
         exchange_url: Optional Academy exchange URL (for cloud mode)
     """
-    from academy import Manager, LocalExchange
+    from academy.manager import Manager
+    from academy.exchange import LocalExchangeFactory
 
     from skills.shepherd import ShepherdAgent
 
@@ -147,13 +152,13 @@ async def run_agents(
     logging.info(f"  Shepherds: {num_shepherds}")
     logging.info(f"  Device: {device}")
 
-    # Create exchange
+    # Create exchange factory
     if exchange_url:
-        from academy import CloudExchange
-        exchange = CloudExchange(url=exchange_url)
+        from academy.exchange.cloud import CloudExchangeFactory
+        exchange_factory = CloudExchangeFactory(url=exchange_url)
         logging.info(f"  Exchange: cloud ({exchange_url})")
     else:
-        exchange = LocalExchange()
+        exchange_factory = LocalExchangeFactory()
         logging.info("  Exchange: local (in-memory)")
 
     # Shutdown event
@@ -168,7 +173,7 @@ async def run_agents(
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, lambda s=sig: handle_signal(s))
 
-    async with Manager(exchange=exchange) as manager:
+    async with await Manager.from_exchange_factory(exchange_factory) as manager:
         # Launch individual simulation agents
         logging.info("Launching simulation agents...")
         sim_agents = await launch_simulation_agents(manager, agent_names, device)
@@ -320,8 +325,8 @@ Examples:
     parser.add_argument(
         "--agents",
         nargs="+",
-        default=["mace", "chgnet", "cantera", "surrogate", "stability"],
-        help="Simulation agents to launch (default: mace chgnet cantera surrogate stability)",
+        default=["mace", "chgnet", "m3gnet", "cantera", "surrogate", "stability", "qe", "gpaw", "openmm", "gromacs", "catmap"],
+        help="Simulation agents to launch (default: all 11 agents)",
     )
     parser.add_argument(
         "--num-shepherds",

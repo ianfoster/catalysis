@@ -6,7 +6,7 @@ import logging
 import math
 from typing import Any
 
-from academy import Agent, action
+from academy.agent import Agent, action
 
 logger = logging.getLogger(__name__)
 
