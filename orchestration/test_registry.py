@@ -96,7 +96,7 @@ AVAILABLE_TESTS: dict[str, TestSpec] = {
         ),
         cost=2.0,
         endpoint="cheap",
-        prerequisites=("ml_screening",),
+        prerequisites=(),  # Removed temporarily
         timeout=300,
         outputs=("final_energy_eV", "converged", "n_steps"),
         reduces_uncertainty=True,
@@ -114,7 +114,7 @@ AVAILABLE_TESTS: dict[str, TestSpec] = {
         ),
         cost=1.0,
         endpoint="cheap",
-        prerequisites=("fast_surrogate",),
+        prerequisites=(),  # Removed temporarily
         timeout=120,
         outputs=("RLS", "temp_sensitivity", "pressure_sensitivity", "uncertainty_reduction"),
         reduces_uncertainty=True,
@@ -132,7 +132,7 @@ AVAILABLE_TESTS: dict[str, TestSpec] = {
         ),
         cost=100.0,
         endpoint="gpu",
-        prerequisites=("ml_screening",),
+        prerequisites=(),  # Removed temporarily
         timeout=7200,
         outputs=("E_ads_CO2", "E_ads_H", "uncertainty_reduction"),
         reduces_uncertainty=True,
@@ -150,7 +150,7 @@ AVAILABLE_TESTS: dict[str, TestSpec] = {
         ),
         cost=5.0,
         endpoint="gpu",
-        prerequisites=("fast_surrogate",),
+        prerequisites=(),  # Removed temporarily
         timeout=600,
         outputs=("relaxed_energy", "structure_rmsd"),
         reduces_uncertainty=True,
@@ -168,7 +168,7 @@ AVAILABLE_TESTS: dict[str, TestSpec] = {
         ),
         cost=0.1,
         endpoint="cheap",
-        prerequisites=("fast_surrogate",),
+        prerequisites=(),  # Removed temporarily
         timeout=60,
         outputs=("stability_score", "degradation_risk"),
         reduces_uncertainty=False,
@@ -186,7 +186,7 @@ AVAILABLE_TESTS: dict[str, TestSpec] = {
         ),
         cost=1.0,
         endpoint="cheap",
-        prerequisites=("fast_surrogate",),
+        prerequisites=(),  # Removed temporarily
         timeout=120,
         outputs=("conversion", "selectivity", "products"),
         reduces_uncertainty=True,
