@@ -284,11 +284,13 @@ class ShepherdAgent(Agent):
                     test_spec = get_test(test_name)
                 except KeyError as e:
                     logger.warning("Unknown test requested: %s", test_name)
-                    history[-1]["error"] = str(e)
+                    error_msg = f"Unknown test: {test_name}"
+                    history[-1]["error"] = error_msg
+                    results.append({"test": test_name, "result": {"error": error_msg, "ok": False}, "cost": 0})
                     continue
 
                 # Check prerequisites
-                completed_tests = {r["test"] for r in results}
+                completed_tests = {r["test"] for r in results if r.get("result", {}).get("ok", True)}
                 satisfied, missing = check_prerequisites(test_name, completed_tests)
                 if not satisfied:
                     logger.warning(
@@ -296,7 +298,9 @@ class ShepherdAgent(Agent):
                         test_name,
                         missing,
                     )
-                    history[-1]["error"] = f"Prerequisites not met: {missing}"
+                    error_msg = f"Prerequisites not met: need {missing} first"
+                    history[-1]["error"] = error_msg
+                    results.append({"test": test_name, "result": {"error": error_msg, "ok": False}, "cost": 0})
                     continue
 
                 # Check budget
@@ -307,7 +311,9 @@ class ShepherdAgent(Agent):
                         test_spec.cost,
                         budget_total - budget_spent,
                     )
-                    history[-1]["error"] = "Insufficient budget"
+                    error_msg = f"Insufficient budget for {test_name}"
+                    history[-1]["error"] = error_msg
+                    results.append({"test": test_name, "result": {"error": error_msg, "ok": False}, "cost": 0})
                     continue
 
                 # Run the test
