@@ -49,7 +49,7 @@ shepherd:
     gpu: "cee14c1d-100c-417b-9049-8c8914f3ff56"
 
   timeouts:
-    llm_call: 30
+    llm_call: 120
     test_poll_interval: 1.0
     test_max_wait: 7200
 

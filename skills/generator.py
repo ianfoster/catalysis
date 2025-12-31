@@ -33,6 +33,7 @@ from orchestration.generator_prompts import (
     build_proposal_prompt,
     build_convergence_prompt,
 )
+from orchestration.narrative import get_narrative, reset_narrative
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +103,7 @@ class GeneratorAgent(Agent):
 
     async def agent_on_startup(self) -> None:
         """Initialize resources after agent starts."""
-        await self._initialize()
+        self._initialize()
 
     def _initialize(self) -> None:
         """Initialize resources (can be called sync or async)."""
@@ -198,6 +199,9 @@ class GeneratorAgent(Agent):
             candidates_per_iter,
         )
 
+        # Reset narrative log for fresh run
+        narrative = reset_narrative()
+
         while not shutdown.is_set() and self._running:
             iteration = self._state.iteration
 
@@ -206,11 +210,14 @@ class GeneratorAgent(Agent):
                 self._state.converged = True
                 self._state.stop_reason = f"Reached max iterations ({max_iterations})"
                 logger.info("Stopping: %s", self._state.stop_reason)
+                narrative.generator_converged(self._state.stop_reason, len(self._state.candidates_evaluated), self._state.best_score)
                 break
 
             logger.info("=== Generation iteration %d ===", iteration + 1)
+            narrative.generator_start(iteration + 1, max_iterations, candidates_per_iter)
 
             # Step 1: Propose candidates via LLM
+            narrative.generator_proposing(self._state.get_top_performers(5))
             candidates = await self._propose_candidates(candidates_per_iter)
             if not candidates:
                 logger.warning("No valid candidates proposed, retrying...")
@@ -252,9 +259,15 @@ class GeneratorAgent(Agent):
                 self._state.best_score,
                 len(self._state.candidates_evaluated),
             )
+            narrative.generator_iteration_done(iteration + 1, results)
 
         # Final summary
         logger.info("Generation complete: %s", json.dumps(self._state.get_summary(), indent=2))
+        narrative.generator_converged(
+            self._state.stop_reason or "Complete",
+            len(self._state.candidates_evaluated),
+            self._state.best_score,
+        )
         self.agent_shutdown()
 
     async def _propose_candidates(self, n: int) -> list[dict[str, Any]]:
@@ -286,6 +299,10 @@ class GeneratorAgent(Agent):
         reasoning = response.get("reasoning", "")
         logger.info("LLM proposal reasoning: %s", reasoning[:200])
 
+        # Log to narrative
+        narrative = get_narrative()
+        narrative.generator_proposed(raw_candidates, reasoning)
+
         # Validate and normalize candidates
         validated = []
         for raw in raw_candidates:
@@ -306,7 +323,9 @@ class GeneratorAgent(Agent):
         self,
         candidates: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """Evaluate candidates using ShepherdAgents on Spark via GC.
+        """Evaluate candidates using ShepherdAgents.
+
+        Uses Academy agents if available, otherwise falls back to Globus Compute.
 
         Args:
             candidates: List of candidate dicts to evaluate
@@ -319,9 +338,14 @@ class GeneratorAgent(Agent):
         num_concurrent = shepherd_config.get("num_concurrent", 4)
         timeout = shepherd_config.get("timeout", 3600)
 
+        # Try Academy-based evaluation first (if running as Academy agent)
+        if ACADEMY_AVAILABLE and hasattr(self, 'agent_launch_alongside'):
+            return await self._evaluate_via_academy(candidates, budget, timeout)
+
+        # Fall back to GC-based evaluation
         if not self._gc_executor or not self._shepherd_func_id:
-            logger.error("GC not configured - cannot evaluate candidates on Spark")
-            return [{"candidate": c, "error": "GC not configured"} for c in candidates]
+            logger.error("Neither Academy nor GC configured - cannot evaluate candidates")
+            return [{"candidate": c, "error": "No execution backend configured"} for c in candidates]
 
         logger.info(
             "Submitting %d candidates to Spark (max concurrent: %d)",
@@ -361,6 +385,75 @@ class GeneratorAgent(Agent):
                 results.append({"candidate": candidate, "error": "timeout", "ok": False})
             except Exception as e:
                 logger.error("Error for %s: %s", candidate_to_str(candidate), e)
+                results.append({"candidate": candidate, "error": str(e), "ok": False})
+
+        return results
+
+    async def _evaluate_via_academy(
+        self,
+        candidates: list[dict[str, Any]],
+        budget: float,
+        timeout: float,
+    ) -> list[dict[str, Any]]:
+        """Evaluate candidates using Academy ShepherdAgents on Spark.
+
+        Discovers ShepherdAgents running on Spark via the exchange and
+        dispatches evaluation requests to them.
+
+        Args:
+            candidates: List of candidate dicts to evaluate
+            budget: Budget per candidate
+            timeout: Timeout for evaluation
+
+        Returns:
+            List of evaluation results
+        """
+        from skills.shepherd import ShepherdAgent
+        from academy.handle import Handle
+
+        logger.info("Evaluating %d candidates via Academy agents", len(candidates))
+
+        # Discover ShepherdAgents on the exchange
+        exchange = self.agent_exchange_client
+        shepherd_ids = await exchange.discover(ShepherdAgent)
+
+        if not shepherd_ids:
+            logger.error("No ShepherdAgents found on exchange! Start run_spark_agents.py on Spark.")
+            return [{"candidate": c, "error": "No ShepherdAgents available", "ok": False} for c in candidates]
+
+        logger.info("Found %d ShepherdAgents on exchange", len(shepherd_ids))
+
+        # Use round-robin to distribute candidates across shepherds
+        narrative = get_narrative()
+        results = []
+        for i, candidate in enumerate(candidates):
+            # Pick a shepherd (round-robin)
+            shepherd_id = shepherd_ids[i % len(shepherd_ids)]
+            shepherd = Handle(shepherd_id)
+
+            logger.info("Sending %s to ShepherdAgent %s", candidate_to_str(candidate), shepherd_id)
+            narrative.generator_dispatching(candidate, str(shepherd_id), "Spark")
+
+            try:
+                # Call evaluate action on remote shepherd
+                result = await asyncio.wait_for(
+                    shepherd.evaluate({
+                        "candidate": candidate,
+                        "budget": budget,
+                    }),
+                    timeout=timeout,
+                )
+                results.append(result)
+
+                score = result.get("final_assessment", {}).get("viability_score", 0)
+                logger.info("Completed: %s (score: %d)", candidate_to_str(candidate), score)
+                narrative.generator_received_result(candidate, score, "Spark")
+
+            except asyncio.TimeoutError:
+                logger.error("Timeout evaluating: %s", candidate_to_str(candidate))
+                results.append({"candidate": candidate, "error": "timeout", "ok": False})
+            except Exception as e:
+                logger.error("Error evaluating %s: %s", candidate_to_str(candidate), e)
                 results.append({"candidate": candidate, "error": str(e), "ok": False})
 
         return results

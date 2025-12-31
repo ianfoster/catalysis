@@ -35,6 +35,7 @@ from orchestration.shepherd_prompts import (
     build_reasoning_prompt,
     build_final_assessment_prompt,
 )
+from orchestration.narrative import get_narrative
 
 if TYPE_CHECKING:
     from skills.llm_agent import LLMAgent
@@ -97,11 +98,10 @@ class ShepherdAgent(Agent):
         self._llm_agent = llm_agent
         self._sim_agent = sim_agent  # Legacy single agent
         self._sim_agents = sim_agents or {}  # New: individual agents per code
-        self._use_agents = (
-            llm_agent is not None or
-            sim_agent is not None or
-            bool(sim_agents)
-        )
+        # Only use Academy LLM agent if explicitly provided
+        self._use_llm_agent = llm_agent is not None
+        # Use sim agents if provided
+        self._use_sim_agents = sim_agent is not None or bool(sim_agents)
 
         # Remote LLM mode (direct HTTP to vLLM)
         self._llm_url = llm_url
@@ -123,20 +123,16 @@ class ShepherdAgent(Agent):
         # Get system prompt with capabilities
         self._system_prompt = get_system_prompt(include_capabilities=True)
 
-        if self._use_agents:
-            # Mode 1: Academy agents
-            logger.info("ShepherdAgent starting in Academy agents mode")
-            if self._llm_agent:
-                status = await self._llm_agent.get_status({})
-                logger.info("LLMAgent connected: model=%s", status.get("model"))
-            if self._sim_agent:
-                status = await self._sim_agent.get_status({})
-                logger.info("SimulationAgent connected: codes=%s", status.get("available_codes"))
+        # Initialize LLM client (three options)
+        if self._use_llm_agent:
+            # Use Academy LLM agent
+            logger.info("ShepherdAgent: using Academy LLM agent")
+            status = await self._llm_agent.get_status({})
+            logger.info("LLMAgent connected: model=%s", status.get("model"))
 
         elif self._llm_url:
-            # Mode 2: Remote LLM (direct HTTP to vLLM on Spark)
-            logger.info("ShepherdAgent starting in remote LLM mode")
-            logger.info("Connecting to vLLM at: %s", self._llm_url)
+            # Use remote LLM (direct HTTP to vLLM)
+            logger.info("ShepherdAgent: using remote vLLM at %s", self._llm_url)
 
             from openai import AsyncOpenAI
             self._remote_llm_client = AsyncOpenAI(
@@ -159,12 +155,9 @@ class ShepherdAgent(Agent):
                 logger.error("Failed to connect to remote vLLM: %s", e)
                 raise
 
-            # Still need GC for simulations
-            self._init_gc_adapters()
-
         else:
-            # Mode 3: Direct GC mode (config-based LLM + GC)
-            logger.info("ShepherdAgent starting in direct GC mode")
+            # Use config-based LLM client
+            logger.info("ShepherdAgent: using config-based LLM")
             from orchestration.llm_client import create_llm_client_from_config
             self._llm_client = create_llm_client_from_config(self._config)
             logger.info(
@@ -172,6 +165,16 @@ class ShepherdAgent(Agent):
                 self._llm_client.model,
                 self._llm_client.base_url,
             )
+
+        # Initialize simulation backend (three options)
+        if self._use_sim_agents:
+            # Use Academy simulation agents
+            logger.info("ShepherdAgent: using %d Academy simulation agents", len(self._sim_agents))
+            if self._sim_agent:
+                status = await self._sim_agent.get_status({})
+                logger.info("SimulationAgent connected: codes=%s", status.get("available_codes"))
+        else:
+            # Initialize GC adapters for simulations
             self._init_gc_adapters()
 
         # Cache (common to all modes)
@@ -225,6 +228,9 @@ class ShepherdAgent(Agent):
             budget_total,
         )
 
+        narrative = get_narrative()
+        narrative.shepherd_start(candidate, budget_total)
+
         results: list[dict[str, Any]] = []
         history: list[dict[str, Any]] = []
         budget_spent = 0.0
@@ -243,6 +249,7 @@ class ShepherdAgent(Agent):
             )
 
             # Get LLM decision
+            narrative.shepherd_thinking(f"iteration {iteration}, budget spent {budget_spent:.1f}/{budget_total}")
             try:
                 decision = await self._reason_json(prompt)
             except Exception as e:
@@ -305,22 +312,45 @@ class ShepherdAgent(Agent):
 
                 # Run the test
                 logger.info("Running test: %s (cost=%.2f)", test_name, test_spec.cost)
+                reasoning = decision.get("reasoning", "")
+                narrative.shepherd_decision(test_name, reasoning, test_spec.cost)
+                narrative.shepherd_running_test(test_name, test_spec.agent if hasattr(test_spec, 'agent') else None)
+
+                t0 = time.time()
                 try:
                     test_result = await self._run_test(test_name, candidate)
+                    elapsed = time.time() - t0
                     results.append({
                         "test": test_name,
                         "result": test_result,
                         "cost": test_spec.cost,
                     })
+                    narrative.shepherd_test_result(test_name, test_result, elapsed)
                     budget_spent += test_spec.cost
                     history[-1]["test_result"] = test_result
                 except Exception as e:
                     logger.error("Test %s failed: %s", test_name, e)
+                    # Add failed test to results so LLM knows it failed
+                    results.append({
+                        "test": test_name,
+                        "result": {"error": str(e), "ok": False},
+                        "cost": test_spec.cost,
+                    })
+                    budget_spent += test_spec.cost  # Charge budget for failed tests
                     history[-1]["error"] = str(e)
 
         # Generate final assessment
         final_assessment = await self._generate_final_assessment(
             candidate, results, budget_spent
+        )
+
+        # Log completion to narrative
+        narrative.shepherd_done(
+            candidate,
+            final_assessment.get("viability_score", 0),
+            final_assessment.get("recommendation", "unknown"),
+            len(results),
+            budget_spent,
         )
 
         return {

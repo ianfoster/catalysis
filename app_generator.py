@@ -301,7 +301,6 @@ async def main() -> int:
                     "config": generator_config,
                     "shepherd_config": shepherd_config,
                     "gc_function_map": gc_function_map,
-                    "manager": manager,
                 },
             )
 
