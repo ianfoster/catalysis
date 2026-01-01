@@ -39,22 +39,32 @@ logger = logging.getLogger(__name__)
 
 # Import Academy components conditionally
 try:
-    from academy.agent import Agent, action, loop
+    from academy.agent import action, loop
     from academy.manager import Manager
     from academy.exchange import LocalExchangeFactory
+    from skills.base_agent import TrackedAgent
     ACADEMY_AVAILABLE = True
 except ImportError:
     ACADEMY_AVAILABLE = False
     # Provide stub classes for when Academy isn't available
-    class Agent:
-        pass
+    class TrackedAgent:
+        def __init__(self, max_history: int = 100):
+            pass
+        def track_action(self, name, req):
+            class DummyTracker:
+                def __enter__(self): return self
+                def __exit__(self, *args): pass
+                def set_result(self, r): pass
+            return DummyTracker()
+        def _get_statistics(self):
+            return {"total_actions": 0, "total_time_s": 0, "action_counts": {}}
     def action(f):
         return f
     def loop(f):
         return f
 
 
-class GeneratorAgent(Agent):
+class GeneratorAgent(TrackedAgent):
     """Orchestrates catalyst candidate discovery using LLM and distributed ShepherdAgents.
 
     The generator runs an autonomous loop that:
@@ -62,6 +72,8 @@ class GeneratorAgent(Agent):
     2. Spawns ShepherdAgents on Spark via GC to evaluate each candidate
     3. Updates state and checks for convergence
     4. Continues until stopping criteria met
+
+    Inherits from TrackedAgent for automatic history tracking.
     """
 
     def __init__(
@@ -90,8 +102,7 @@ class GeneratorAgent(Agent):
             redis_host: Redis hostname for distributed narrative logging
             redis_port: Redis port (default 6379)
         """
-        if ACADEMY_AVAILABLE:
-            super().__init__()
+        super().__init__(max_history=100)
         self._config = config
         self._shepherd_config = shepherd_config or {}
         self._gc_function_map = gc_function_map or {}
@@ -525,11 +536,25 @@ class GeneratorAgent(Agent):
         Returns:
             Status dict with iteration, best_score, converged, etc.
         """
+        stats = self._get_statistics()
+
         if not self._state:
-            return {"error": "State not initialized"}
+            return {
+                "ok": True,
+                "error": "State not initialized",
+                "total_actions": stats["total_actions"],
+                "total_time_s": stats["total_time_s"],
+                "action_counts": stats["action_counts"],
+            }
 
         return {
+            "ok": True,
             "running": self._running,
+            "llm_model": self._llm.model if self._llm else None,
+            "gc_endpoint": self._gc_endpoint,
+            "total_actions": stats["total_actions"],
+            "total_time_s": stats["total_time_s"],
+            "action_counts": stats["action_counts"],
             **self._state.get_summary(),
         }
 

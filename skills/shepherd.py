@@ -21,8 +21,9 @@ import re
 import time
 from typing import Any, TYPE_CHECKING
 
-from academy.agent import Agent, action
+from academy.agent import action
 
+from skills.base_agent import TrackedAgent
 from orchestration.cache import JsonlCache, make_cache_key, git_short_sha
 from orchestration.test_registry import (
     get_test,
@@ -44,7 +45,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class ShepherdAgent(Agent):
+class ShepherdAgent(TrackedAgent):
     """Autonomous agent that evaluates a catalyst candidate.
 
     Uses LLM reasoning to decide which characterization tests to run,
@@ -54,6 +55,8 @@ class ShepherdAgent(Agent):
     1. Academy agents mode: Uses LLMAgent and SimulationAgent via exchange
     2. Remote LLM mode: Direct HTTP to remote vLLM + GC for simulations
     3. Direct GC mode: Uses GC function calls for everything
+
+    Inherits from TrackedAgent for automatic history tracking.
     """
 
     def __init__(
@@ -94,7 +97,7 @@ class ShepherdAgent(Agent):
             redis_host: Redis hostname for distributed narrative logging.
             redis_port: Redis port (default 6379).
         """
-        super().__init__()
+        super().__init__(max_history=100)
         self._config = config
         self._gc_function_map = gc_function_map or {}
         self._redis_host = redis_host
@@ -227,6 +230,10 @@ class ShepherdAgent(Agent):
         budget_config = self._config.get("budget", {})
         budget_total = req.get("budget", budget_config.get("default", 100.0))
         goal = req.get("goal", "CO2-to-methanol conversion")
+
+        # Track this evaluation
+        action_tracker = self.track_action("evaluate", req)
+        action_tracker.__enter__()
 
         logger.info(
             "ShepherdAgent evaluating candidate: %s (budget=%.2f)",
@@ -384,7 +391,7 @@ class ShepherdAgent(Agent):
             budget_spent,
         )
 
-        return {
+        result = {
             "candidate": candidate,
             "results": results,
             "total_cost": budget_spent,
@@ -393,6 +400,12 @@ class ShepherdAgent(Agent):
             "history": history,
             "iterations": iteration,
         }
+
+        # Complete action tracking
+        action_tracker.set_result(result)
+        action_tracker.__exit__(None, None, None)
+
+        return result
 
     async def _reason_json(self, prompt: str) -> dict[str, Any]:
         """Get JSON response from LLM using appropriate mode.
@@ -769,6 +782,22 @@ class ShepherdAgent(Agent):
                 "recommendation": "DEPRIORITIZE",
                 "summary": "Assessment generation failed; manual review required.",
             }
+
+    @action
+    async def get_status(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Get agent status including history statistics."""
+        stats = self._get_statistics()
+        return {
+            "ok": True,
+            "ready": True,
+            "mode": "remote_llm" if self._remote_llm_client else "config_llm" if self._llm_client else "academy_llm",
+            "llm_model": self._llm_model,
+            "num_sim_agents": len(self._sim_agents),
+            "cache_entries": len(self._cache.index) if self._cache else 0,
+            "total_actions": stats["total_actions"],
+            "total_time_s": stats["total_time_s"],
+            "action_counts": stats["action_counts"],
+        }
 
 
 def _candidate_summary(candidate: dict[str, Any]) -> str:
