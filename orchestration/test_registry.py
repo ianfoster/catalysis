@@ -1,12 +1,16 @@
 """Test registry for ShepherdAgent.
 
 Defines available characterization tests with metadata for LLM reasoning.
+Includes RuntimeTracker for adaptive test classification based on observed runtimes.
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -197,6 +201,19 @@ AVAILABLE_TESTS: dict[str, TestSpec] = {
     ),
 }
 
+# Cost threshold for cheap vs expensive tests
+CHEAP_TEST_THRESHOLD = 2.0
+
+
+def get_cheap_tests() -> list[TestSpec]:
+    """Get all tests below the cheap threshold."""
+    return [t for t in AVAILABLE_TESTS.values() if t.cost < CHEAP_TEST_THRESHOLD]
+
+
+def get_expensive_tests() -> list[TestSpec]:
+    """Get all tests at or above the cheap threshold."""
+    return [t for t in AVAILABLE_TESTS.values() if t.cost >= CHEAP_TEST_THRESHOLD]
+
 
 def get_test(name: str) -> TestSpec:
     """Get test specification by name.
@@ -314,3 +331,252 @@ def estimate_total_cost(test_names: list[str]) -> float:
         Sum of test costs
     """
     return sum(get_test(name).cost for name in test_names)
+
+
+# ============================================================================
+# Runtime Tracking for Adaptive Classification
+# ============================================================================
+
+# Default threshold for "fast" tests (seconds)
+FAST_TEST_THRESHOLD_S = 30.0
+
+# Maximum number of observations to keep per test
+MAX_RUNTIME_OBSERVATIONS = 100
+
+
+class RuntimeTracker:
+    """Tracks observed test runtimes for adaptive classification.
+
+    Stores runtime observations in Redis for distributed visibility.
+    Falls back to in-memory storage if Redis unavailable.
+
+    Usage:
+        tracker = RuntimeTracker(redis_host="spark")
+        tracker.record("ml_screening", 8.5)
+        avg = tracker.get_average("ml_screening")
+        fast_tests = tracker.get_fast_tests(threshold_s=30.0)
+    """
+
+    REDIS_KEY_PREFIX = "test_runtime:"
+
+    def __init__(
+        self,
+        redis_host: str | None = None,
+        redis_port: int = 6379,
+    ):
+        """Initialize RuntimeTracker.
+
+        Args:
+            redis_host: Redis hostname. If None, uses in-memory storage.
+            redis_port: Redis port (default 6379).
+        """
+        self._redis = None
+        self._local_cache: dict[str, list[float]] = {}  # Fallback storage
+
+        if redis_host:
+            try:
+                import redis
+                self._redis = redis.Redis(
+                    host=redis_host,
+                    port=redis_port,
+                    decode_responses=True,
+                )
+                self._redis.ping()
+                logger.info("RuntimeTracker connected to Redis at %s:%d", redis_host, redis_port)
+            except Exception as e:
+                logger.warning("RuntimeTracker: Redis unavailable (%s), using local cache", e)
+                self._redis = None
+
+    def record(self, test_name: str, runtime_s: float) -> None:
+        """Record an observed runtime for a test.
+
+        Args:
+            test_name: Name of the test
+            runtime_s: Observed runtime in seconds
+        """
+        if self._redis:
+            try:
+                key = f"{self.REDIS_KEY_PREFIX}{test_name}"
+                self._redis.lpush(key, runtime_s)
+                self._redis.ltrim(key, 0, MAX_RUNTIME_OBSERVATIONS - 1)
+            except Exception as e:
+                logger.warning("Failed to record runtime to Redis: %s", e)
+                self._record_local(test_name, runtime_s)
+        else:
+            self._record_local(test_name, runtime_s)
+
+    def _record_local(self, test_name: str, runtime_s: float) -> None:
+        """Record runtime to local cache."""
+        if test_name not in self._local_cache:
+            self._local_cache[test_name] = []
+        self._local_cache[test_name].insert(0, runtime_s)
+        self._local_cache[test_name] = self._local_cache[test_name][:MAX_RUNTIME_OBSERVATIONS]
+
+    def get_average(self, test_name: str) -> float | None:
+        """Get average observed runtime for a test.
+
+        Args:
+            test_name: Name of the test
+
+        Returns:
+            Average runtime in seconds, or None if no observations
+        """
+        observations = self._get_observations(test_name)
+        if not observations:
+            return None
+        return sum(observations) / len(observations)
+
+    def get_observations(self, test_name: str) -> list[float]:
+        """Get all observed runtimes for a test.
+
+        Args:
+            test_name: Name of the test
+
+        Returns:
+            List of observed runtimes (most recent first)
+        """
+        return self._get_observations(test_name)
+
+    def _get_observations(self, test_name: str) -> list[float]:
+        """Internal method to fetch observations."""
+        if self._redis:
+            try:
+                key = f"{self.REDIS_KEY_PREFIX}{test_name}"
+                values = self._redis.lrange(key, 0, -1)
+                return [float(v) for v in values]
+            except Exception as e:
+                logger.warning("Failed to get observations from Redis: %s", e)
+                return self._local_cache.get(test_name, [])
+        else:
+            return self._local_cache.get(test_name, [])
+
+    def get_estimated_runtime(self, test_name: str) -> float:
+        """Get estimated runtime for a test.
+
+        Uses observed average if available, falls back to expected_runtime_s from TestSpec.
+
+        Args:
+            test_name: Name of the test
+
+        Returns:
+            Estimated runtime in seconds
+        """
+        observed = self.get_average(test_name)
+        if observed is not None:
+            return observed
+
+        # Fall back to expected runtime from spec
+        try:
+            spec = get_test(test_name)
+            return float(spec.expected_runtime_s)
+        except KeyError:
+            return FAST_TEST_THRESHOLD_S  # Default to threshold if unknown
+
+    def get_fast_tests(self, threshold_s: float = FAST_TEST_THRESHOLD_S) -> list[TestSpec]:
+        """Get tests classified as "fast" based on observed or expected runtime.
+
+        Args:
+            threshold_s: Runtime threshold in seconds (default 30s)
+
+        Returns:
+            List of TestSpecs for fast tests
+        """
+        fast = []
+        for name, spec in AVAILABLE_TESTS.items():
+            runtime = self.get_estimated_runtime(name)
+            if runtime < threshold_s:
+                fast.append(spec)
+        return fast
+
+    def get_slow_tests(self, threshold_s: float = FAST_TEST_THRESHOLD_S) -> list[TestSpec]:
+        """Get tests classified as "slow" based on observed or expected runtime.
+
+        Args:
+            threshold_s: Runtime threshold in seconds (default 30s)
+
+        Returns:
+            List of TestSpecs for slow tests
+        """
+        slow = []
+        for name, spec in AVAILABLE_TESTS.items():
+            runtime = self.get_estimated_runtime(name)
+            if runtime >= threshold_s:
+                slow.append(spec)
+        return slow
+
+    def get_classification_summary(self, threshold_s: float = FAST_TEST_THRESHOLD_S) -> dict[str, Any]:
+        """Get summary of test classifications with runtime data.
+
+        Args:
+            threshold_s: Runtime threshold in seconds
+
+        Returns:
+            Dict with fast/slow tests and their runtime info
+        """
+        summary = {
+            "threshold_s": threshold_s,
+            "fast": [],
+            "slow": [],
+        }
+
+        for name, spec in AVAILABLE_TESTS.items():
+            observed = self.get_average(name)
+            estimated = self.get_estimated_runtime(name)
+            n_obs = len(self._get_observations(name))
+
+            entry = {
+                "name": name,
+                "observed_avg_s": round(observed, 2) if observed else None,
+                "expected_s": spec.expected_runtime_s,
+                "estimated_s": round(estimated, 2),
+                "n_observations": n_obs,
+                "source": "observed" if observed else "expected",
+            }
+
+            if estimated < threshold_s:
+                summary["fast"].append(entry)
+            else:
+                summary["slow"].append(entry)
+
+        return summary
+
+
+# Global runtime tracker instance
+_runtime_tracker: RuntimeTracker | None = None
+
+
+def get_runtime_tracker(
+    redis_host: str | None = None,
+    redis_port: int = 6379,
+) -> RuntimeTracker:
+    """Get or create the global runtime tracker.
+
+    Args:
+        redis_host: Redis hostname (only used on first call)
+        redis_port: Redis port (only used on first call)
+
+    Returns:
+        RuntimeTracker instance
+    """
+    global _runtime_tracker
+    if _runtime_tracker is None:
+        _runtime_tracker = RuntimeTracker(redis_host=redis_host, redis_port=redis_port)
+    return _runtime_tracker
+
+
+def reset_runtime_tracker(
+    redis_host: str | None = None,
+    redis_port: int = 6379,
+) -> RuntimeTracker:
+    """Reset and return a fresh runtime tracker.
+
+    Args:
+        redis_host: Redis hostname
+        redis_port: Redis port
+
+    Returns:
+        New RuntimeTracker instance
+    """
+    global _runtime_tracker
+    _runtime_tracker = RuntimeTracker(redis_host=redis_host, redis_port=redis_port)
+    return _runtime_tracker

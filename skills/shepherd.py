@@ -28,7 +28,9 @@ from orchestration.cache import JsonlCache, make_cache_key, git_short_sha
 from orchestration.test_registry import (
     get_test,
     check_prerequisites,
+    get_runtime_tracker,
     AVAILABLE_TESTS,
+    FAST_TEST_THRESHOLD_S,
 )
 from orchestration.shepherd_prompts import (
     get_system_prompt,
@@ -204,6 +206,13 @@ class ShepherdAgent(TrackedAgent):
         # Version for cache keys
         self._version = git_short_sha()
 
+        # Runtime tracker for adaptive test classification
+        self._runtime_tracker = get_runtime_tracker(
+            redis_host=self._redis_host,
+            redis_port=self._redis_port,
+        )
+        logger.info("RuntimeTracker initialized for adaptive test classification")
+
     def _init_gc_adapters(self) -> None:
         """Initialize Globus Compute adapters for simulation dispatch."""
         from hpc.globus_compute import GlobusComputeAdapter
@@ -217,7 +226,10 @@ class ShepherdAgent(TrackedAgent):
 
     @action
     async def evaluate(self, req: dict) -> dict:
-        """Evaluate a catalyst candidate using LLM-guided test selection.
+        """Evaluate a catalyst candidate using two-phase approach.
+
+        Phase 1: Run all cheap tests in parallel (fast, no LLM needed)
+        Phase 2: LLM decides which expensive tests to run based on cheap results
 
         Args:
             req: Request dict with:
@@ -255,23 +267,97 @@ class ShepherdAgent(TrackedAgent):
         results: list[dict[str, Any]] = []
         history: list[dict[str, Any]] = []
         budget_spent = 0.0
-        iteration = 0
-        max_iterations = 20  # Safety limit
-        consecutive_invalid = 0  # Track consecutive invalid LLM requests
-        max_consecutive_invalid = 3  # Force stop after this many invalid requests
 
-        while budget_spent < budget_total and iteration < max_iterations:
-            iteration += 1
+        # ========== PHASE 1: Run all fast tests in parallel ==========
+        # Use RuntimeTracker to classify tests based on observed/expected runtimes
+        fast_tests = self._runtime_tracker.get_fast_tests(threshold_s=FAST_TEST_THRESHOLD_S)
+        affordable_fast = [t for t in fast_tests if t.cost <= budget_total]
 
-            # Check consecutive invalid requests
-            if consecutive_invalid >= max_consecutive_invalid:
-                logger.warning(
-                    "Stopping: %d consecutive invalid LLM requests",
-                    consecutive_invalid,
-                )
-                break
+        logger.info(
+            "Phase 1: Running %d fast tests in parallel (runtime < %.0fs)",
+            len(affordable_fast),
+            FAST_TEST_THRESHOLD_S,
+        )
+        narrative._write(f"   Phase 1: Running {len(affordable_fast)} fast tests in parallel...")
 
-            # Build reasoning prompt
+        if affordable_fast:
+            # Create tasks for all fast tests
+            async def run_fast_test(test_spec):
+                """Run a single fast test and return result dict."""
+                t0 = time.time()
+                try:
+                    test_result = await self._run_test(test_spec.name, candidate)
+                    elapsed = time.time() - t0
+                    return {
+                        "test": test_spec.name,
+                        "result": test_result,
+                        "cost": test_spec.cost,
+                        "elapsed": elapsed,
+                        "ok": True,
+                    }
+                except Exception as e:
+                    elapsed = time.time() - t0
+                    logger.error("Fast test %s failed: %s", test_spec.name, e)
+                    return {
+                        "test": test_spec.name,
+                        "result": {"error": str(e), "ok": False},
+                        "cost": test_spec.cost,
+                        "elapsed": elapsed,
+                        "ok": False,
+                    }
+
+            # Run all fast tests concurrently
+            fast_tasks = [run_fast_test(t) for t in affordable_fast]
+            fast_results = await asyncio.gather(*fast_tasks, return_exceptions=True)
+
+            # Process results and record runtimes
+            for r in fast_results:
+                if isinstance(r, Exception):
+                    logger.error("Fast test task exception: %s", r)
+                    continue
+
+                results.append({
+                    "test": r["test"],
+                    "result": r["result"],
+                    "cost": r["cost"],
+                })
+                budget_spent += r["cost"]
+
+                # Record runtime for adaptive classification
+                if r.get("elapsed"):
+                    self._runtime_tracker.record(r["test"], r["elapsed"])
+
+                # Log to narrative
+                narrative.shepherd_test_result(r["test"], r["result"], r.get("elapsed"))
+
+            history.append({
+                "phase": 1,
+                "tests_run": [r["test"] for r in fast_results if not isinstance(r, Exception)],
+                "budget_spent": budget_spent,
+            })
+
+            logger.info(
+                "Phase 1 complete: %d tests, budget spent %.2f",
+                len(fast_results),
+                budget_spent,
+            )
+
+        # ========== PHASE 2: LLM decides on slow tests ==========
+        slow_tests = self._runtime_tracker.get_slow_tests(threshold_s=FAST_TEST_THRESHOLD_S)
+        affordable_slow = [
+            t for t in slow_tests
+            if t.cost <= (budget_total - budget_spent)
+        ]
+
+        if affordable_slow and budget_spent < budget_total:
+            logger.info(
+                "Phase 2: Consulting LLM about %d slow tests (runtime >= %.0fs)",
+                len(affordable_slow),
+                FAST_TEST_THRESHOLD_S,
+            )
+            narrative._write(f"   Phase 2: Consulting LLM about {len(affordable_slow)} slow tests...")
+
+            # Build prompt for expensive test decision
             prompt = build_reasoning_prompt(
                 candidate=candidate,
                 results=results,
@@ -279,111 +365,131 @@ class ShepherdAgent(TrackedAgent):
                 budget_spent=budget_spent,
             )
 
-            # Get LLM decision
-            narrative.shepherd_thinking(f"iteration {iteration}, budget spent {budget_spent:.1f}/{budget_total}")
-            try:
-                decision = await self._reason_json(prompt)
-            except Exception as e:
-                logger.error("LLM reasoning failed: %s", e)
-                history.append({"iteration": iteration, "error": str(e)})
-                break
+            iteration = 0
+            max_iterations = 10  # Safety limit for expensive tests
+            consecutive_invalid = 0
+            max_consecutive_invalid = 3
 
-            history.append({
-                "iteration": iteration,
-                "decision": decision,
-                "budget_remaining": budget_total - budget_spent,
-            })
+            while budget_spent < budget_total and iteration < max_iterations:
+                iteration += 1
 
-            action_type = decision.get("action", "stop")
-
-            if action_type == "stop":
-                logger.info(
-                    "Shepherd stopping: confidence=%.2f reason=%s",
-                    decision.get("confidence", 0),
-                    decision.get("reasoning", "")[:100],
-                )
-                break
-
-            if action_type == "test":
-                test_name = decision.get("test")
-                if not test_name:
-                    logger.warning("LLM returned test action without test name")
-                    continue
-
-                # Validate test exists
-                try:
-                    test_spec = get_test(test_name)
-                except KeyError as e:
-                    logger.warning("Unknown test requested: %s", test_name)
-                    error_msg = f"Unknown test: {test_name}"
-                    history[-1]["error"] = error_msg
-                    results.append({"test": test_name, "result": {"error": error_msg, "ok": False}, "cost": 0})
-                    consecutive_invalid += 1
-                    continue
-
-                # Check if test already completed (prevent re-running)
-                completed_tests = {r["test"] for r in results if r.get("result", {}).get("ok", True)}
-                if test_name in completed_tests:
-                    logger.warning("Test %s already completed, skipping re-run", test_name)
-                    error_msg = f"Test '{test_name}' already completed - choose a different test or stop"
-                    history[-1]["error"] = error_msg
-                    results.append({"test": test_name, "result": {"error": error_msg, "ok": False, "already_run": True}, "cost": 0})
-                    consecutive_invalid += 1
-                    continue
-                satisfied, missing = check_prerequisites(test_name, completed_tests)
-                if not satisfied:
+                if consecutive_invalid >= max_consecutive_invalid:
                     logger.warning(
-                        "Prerequisites not met for %s: missing %s",
-                        test_name,
-                        missing,
+                        "Stopping: %d consecutive invalid LLM requests",
+                        consecutive_invalid,
                     )
-                    error_msg = f"Prerequisites not met: need {missing} first"
-                    history[-1]["error"] = error_msg
-                    results.append({"test": test_name, "result": {"error": error_msg, "ok": False}, "cost": 0})
-                    continue
+                    break
 
-                # Check budget
-                if test_spec.cost > (budget_total - budget_spent):
-                    logger.warning(
-                        "Test %s costs %.2f but only %.2f budget remaining",
-                        test_name,
-                        test_spec.cost,
-                        budget_total - budget_spent,
-                    )
-                    error_msg = f"Insufficient budget for {test_name}"
-                    history[-1]["error"] = error_msg
-                    results.append({"test": test_name, "result": {"error": error_msg, "ok": False}, "cost": 0})
-                    continue
-
-                # Run the test
-                logger.info("Running test: %s (cost=%.2f)", test_name, test_spec.cost)
-                reasoning = decision.get("reasoning", "")
-                narrative.shepherd_decision(test_name, reasoning, test_spec.cost)
-                narrative.shepherd_running_test(test_name, test_spec.agent if hasattr(test_spec, 'agent') else None)
-
-                t0 = time.time()
+                # Get LLM decision
+                narrative.shepherd_thinking(f"phase 2 iteration {iteration}, budget spent {budget_spent:.1f}/{budget_total}")
                 try:
-                    test_result = await self._run_test(test_name, candidate)
-                    elapsed = time.time() - t0
-                    results.append({
-                        "test": test_name,
-                        "result": test_result,
-                        "cost": test_spec.cost,
-                    })
-                    narrative.shepherd_test_result(test_name, test_result, elapsed)
-                    budget_spent += test_spec.cost
-                    history[-1]["test_result"] = test_result
-                    consecutive_invalid = 0  # Reset on successful test
+                    decision = await self._reason_json(prompt)
                 except Exception as e:
-                    logger.error("Test %s failed: %s", test_name, e)
-                    # Add failed test to results so LLM knows it failed
-                    results.append({
-                        "test": test_name,
-                        "result": {"error": str(e), "ok": False},
-                        "cost": test_spec.cost,
-                    })
-                    budget_spent += test_spec.cost  # Charge budget for failed tests
-                    history[-1]["error"] = str(e)
+                    logger.error("LLM reasoning failed: %s", e)
+                    history.append({"phase": 2, "iteration": iteration, "error": str(e)})
+                    break
+
+                history.append({
+                    "phase": 2,
+                    "iteration": iteration,
+                    "decision": decision,
+                    "budget_remaining": budget_total - budget_spent,
+                })
+
+                action_type = decision.get("action", "stop")
+
+                if action_type == "stop":
+                    logger.info(
+                        "LLM decided to stop: confidence=%.2f reason=%s",
+                        decision.get("confidence", 0),
+                        decision.get("reasoning", "")[:100],
+                    )
+                    break
+
+                if action_type == "test":
+                    test_name = decision.get("test")
+                    if not test_name:
+                        logger.warning("LLM returned test action without test name")
+                        consecutive_invalid += 1
+                        continue
+
+                    # Validate test exists
+                    try:
+                        test_spec = get_test(test_name)
+                    except KeyError:
+                        logger.warning("Unknown test requested: %s", test_name)
+                        history[-1]["error"] = f"Unknown test: {test_name}"
+                        consecutive_invalid += 1
+                        continue
+
+                    # Only allow slow tests in phase 2 (fast tests already run)
+                    estimated_runtime = self._runtime_tracker.get_estimated_runtime(test_name)
+                    if estimated_runtime < FAST_TEST_THRESHOLD_S:
+                        logger.info("Skipping fast test %s in phase 2 (already run)", test_name)
+                        continue
+
+                    # Check if already run
+                    completed_tests = {r["test"] for r in results if r.get("result", {}).get("ok", True)}
+                    if test_name in completed_tests:
+                        logger.warning("Test %s already completed", test_name)
+                        history[-1]["error"] = f"Test '{test_name}' already completed"
+                        consecutive_invalid += 1
+                        continue
+
+                    # Check budget
+                    if test_spec.cost > (budget_total - budget_spent):
+                        logger.warning(
+                            "Test %s costs %.2f but only %.2f budget remaining",
+                            test_name,
+                            test_spec.cost,
+                            budget_total - budget_spent,
+                        )
+                        history[-1]["error"] = f"Insufficient budget for {test_name}"
+                        continue
+
+                    # Run the expensive test
+                    logger.info("Running expensive test: %s (cost=%.2f)", test_name, test_spec.cost)
+                    reasoning = decision.get("reasoning", "")
+                    narrative.shepherd_decision(test_name, reasoning, test_spec.cost)
+                    narrative.shepherd_running_test(test_name, None)
+
+                    t0 = time.time()
+                    try:
+                        test_result = await self._run_test(test_name, candidate)
+                        elapsed = time.time() - t0
+                        results.append({
+                            "test": test_name,
+                            "result": test_result,
+                            "cost": test_spec.cost,
+                        })
+                        # Record runtime for adaptive classification
+                        self._runtime_tracker.record(test_name, elapsed)
+                        narrative.shepherd_test_result(test_name, test_result, elapsed)
+                        budget_spent += test_spec.cost
+                        history[-1]["test_result"] = test_result
+                        consecutive_invalid = 0
+                    except Exception as e:
+                        elapsed = time.time() - t0
+                        logger.error("Test %s failed: %s", test_name, e)
+                        results.append({
+                            "test": test_name,
+                            "result": {"error": str(e), "ok": False},
+                            "cost": test_spec.cost,
+                        })
+                        # Still record runtime even for failed tests
+                        self._runtime_tracker.record(test_name, elapsed)
+                        budget_spent += test_spec.cost
+                        history[-1]["error"] = str(e)
+
+                    # Rebuild prompt with new results for next iteration
+                    prompt = build_reasoning_prompt(
+                        candidate=candidate,
+                        results=results,
+                        budget_total=budget_total,
+                        budget_spent=budget_spent,
+                    )
+        else:
+            logger.info("Phase 2: No affordable slow tests or budget exhausted")
 
         # Generate final assessment
         final_assessment = await self._generate_final_assessment(
@@ -406,7 +512,7 @@ class ShepherdAgent(TrackedAgent):
             "final_assessment": final_assessment,
             "confidence": final_assessment.get("viability_score", 0) / 100.0,
             "history": history,
-            "iterations": iteration,
+            "phases": 2,
         }
 
         # Complete action tracking
@@ -824,6 +930,24 @@ class ShepherdAgent(TrackedAgent):
             "total_actions": stats["total_actions"],
             "total_time_s": stats["total_time_s"],
             "action_counts": stats["action_counts"],
+        }
+
+    @action
+    async def get_runtime_stats(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Get runtime classification statistics for tests.
+
+        Returns summary of fast vs slow test classification based on
+        observed and expected runtimes.
+        """
+        threshold = request.get("threshold_s", FAST_TEST_THRESHOLD_S)
+        summary = self._runtime_tracker.get_classification_summary(threshold_s=threshold)
+        return {
+            "ok": True,
+            "threshold_s": threshold,
+            "fast_tests": summary["fast"],
+            "slow_tests": summary["slow"],
+            "n_fast": len(summary["fast"]),
+            "n_slow": len(summary["slow"]),
         }
 
 
