@@ -242,9 +242,19 @@ class ShepherdAgent(Agent):
         budget_spent = 0.0
         iteration = 0
         max_iterations = 20  # Safety limit
+        consecutive_invalid = 0  # Track consecutive invalid LLM requests
+        max_consecutive_invalid = 3  # Force stop after this many invalid requests
 
         while budget_spent < budget_total and iteration < max_iterations:
             iteration += 1
+
+            # Check consecutive invalid requests
+            if consecutive_invalid >= max_consecutive_invalid:
+                logger.warning(
+                    "Stopping: %d consecutive invalid LLM requests",
+                    consecutive_invalid,
+                )
+                break
 
             # Build reasoning prompt
             prompt = build_reasoning_prompt(
@@ -293,6 +303,7 @@ class ShepherdAgent(Agent):
                     error_msg = f"Unknown test: {test_name}"
                     history[-1]["error"] = error_msg
                     results.append({"test": test_name, "result": {"error": error_msg, "ok": False}, "cost": 0})
+                    consecutive_invalid += 1
                     continue
 
                 # Check if test already completed (prevent re-running)
@@ -302,6 +313,7 @@ class ShepherdAgent(Agent):
                     error_msg = f"Test '{test_name}' already completed - choose a different test or stop"
                     history[-1]["error"] = error_msg
                     results.append({"test": test_name, "result": {"error": error_msg, "ok": False, "already_run": True}, "cost": 0})
+                    consecutive_invalid += 1
                     continue
                 satisfied, missing = check_prerequisites(test_name, completed_tests)
                 if not satisfied:
@@ -346,6 +358,7 @@ class ShepherdAgent(Agent):
                     narrative.shepherd_test_result(test_name, test_result, elapsed)
                     budget_spent += test_spec.cost
                     history[-1]["test_result"] = test_result
+                    consecutive_invalid = 0  # Reset on successful test
                 except Exception as e:
                     logger.error("Test %s failed: %s", test_name, e)
                     # Add failed test to results so LLM knows it failed
