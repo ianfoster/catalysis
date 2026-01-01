@@ -64,6 +64,7 @@ class ShepherdAgent(TrackedAgent):
         config: dict[str, Any],
         gc_function_map: dict[str, str] | None = None,
         llm_agent: "LLMAgent | None" = None,
+        llm_proxy: Any | None = None,
         sim_agent: "SimulationAgent | None" = None,
         sim_agents: dict[str, Any] | None = None,
         llm_url: str | None = None,
@@ -105,6 +106,7 @@ class ShepherdAgent(TrackedAgent):
 
         # Academy agent mode
         self._llm_agent = llm_agent
+        self._llm_proxy = llm_proxy  # LLMProxyAgent for tracked LLM calls
         self._sim_agent = sim_agent  # Legacy single agent
         self._sim_agents = sim_agents or {}  # New: individual agents per code
         # Only use Academy LLM agent if explicitly provided
@@ -132,12 +134,18 @@ class ShepherdAgent(TrackedAgent):
         # Get system prompt with capabilities
         self._system_prompt = get_system_prompt(include_capabilities=True)
 
-        # Initialize LLM client (three options)
+        # Initialize LLM client (four options)
         if self._use_llm_agent:
-            # Use Academy LLM agent
+            # Use Academy LLM agent (legacy)
             logger.info("ShepherdAgent: using Academy LLM agent")
             status = await self._llm_agent.get_status({})
             logger.info("LLMAgent connected: model=%s", status.get("model"))
+
+        elif self._llm_proxy:
+            # Use LLM Proxy agent (preferred - tracks usage)
+            logger.info("ShepherdAgent: using LLM Proxy agent")
+            status = await self._llm_proxy.get_status({})
+            logger.info("LLMProxy connected: model=%s", status.get("model"))
 
         elif self._llm_url:
             # Use remote LLM (direct HTTP to vLLM)
@@ -417,7 +425,7 @@ class ShepherdAgent(TrackedAgent):
             Parsed JSON response dict
         """
         if self._llm_agent:
-            # Academy agent mode
+            # Academy agent mode (legacy)
             response = await self._llm_agent.chat_completion_json({
                 "messages": [
                     {"role": "system", "content": self._system_prompt},
@@ -429,6 +437,25 @@ class ShepherdAgent(TrackedAgent):
 
             if not response.get("ok"):
                 raise RuntimeError(f"LLMAgent error: {response.get('error')}")
+
+            if "parsed" in response:
+                return response["parsed"]
+            else:
+                return json.loads(response.get("content", "{}"))
+
+        elif self._llm_proxy:
+            # LLM Proxy mode - uses LLMProxyAgent for tracking
+            response = await self._llm_proxy.chat_completion_json({
+                "messages": [
+                    {"role": "system", "content": self._system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0.7,
+                "max_tokens": 1024,
+            })
+
+            if not response.get("ok"):
+                raise RuntimeError(f"LLMProxy error: {response.get('error')}")
 
             if "parsed" in response:
                 return response["parsed"]

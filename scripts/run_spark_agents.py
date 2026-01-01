@@ -233,7 +233,8 @@ async def run_agents(
                 kwargs={
                     "config": shepherd_config,
                     "sim_agents": sim_agents,  # Pass individual agents
-                    "llm_url": llm_url,
+                    "llm_proxy": llm_proxy,  # Use LLM proxy for tracking
+                    "llm_url": llm_url,  # Fallback if proxy not available
                     "llm_model": llm_model,
                     "redis_host": redis_host,
                     "redis_port": redis_port,

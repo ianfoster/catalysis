@@ -45,12 +45,19 @@ class M3GNetAgent(TrackedAgent):
         # Try matgl first (newer, maintained)
         try:
             import matgl
+            logger.info(f"MatGL {matgl.__version__} found")
+
             from matgl.ext.ase import M3GNetCalculator
+            logger.info("M3GNetCalculator imported")
+
             self._potential = matgl.load_model("M3GNet-MP-2021.2.8-PES")
+            logger.info("M3GNet model loaded")
+
             self._calculator = M3GNetCalculator
             self._m3gnet_available = True
-            logger.info(f"MatGL {matgl.__version__} loaded with M3GNet potential")
-        except ImportError:
+            logger.info("MatGL M3GNet ready")
+        except ImportError as e:
+            logger.warning(f"MatGL import failed: {e}")
             # Fall back to old m3gnet
             try:
                 from m3gnet.models import M3GNet, Potential, M3GNetCalculator
@@ -58,10 +65,10 @@ class M3GNetAgent(TrackedAgent):
                 self._calculator = M3GNetCalculator
                 self._m3gnet_available = True
                 logger.info("Legacy m3gnet model loaded")
-            except ImportError as e:
-                logger.error(f"Neither matgl nor m3gnet available: {e}")
-            except Exception as e:
-                logger.error(f"Failed to load m3gnet model: {e}")
+            except ImportError as e2:
+                logger.error(f"Neither matgl nor m3gnet available: matgl={e}, m3gnet={e2}")
+            except Exception as e2:
+                logger.error(f"Failed to load m3gnet model: {e2}")
         except Exception as e:
             logger.error(f"Failed to load MatGL model: {e}")
 
