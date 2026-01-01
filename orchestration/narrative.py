@@ -51,6 +51,9 @@ class NarrativeLogger:
                 print(f"Warning: Could not connect to Redis at {redis_host}:{redis_port}: {e}")
                 self._redis = None
 
+    LOG_KEY = "narrative:log"
+    MAX_LOG_ENTRIES = 1000
+
     def _write(self, text: str) -> None:
         """Append text to narrative log and optionally publish to Redis."""
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -63,7 +66,12 @@ class NarrativeLogger:
         # Publish to Redis if connected
         if self._redis:
             try:
+                # Publish for real-time subscribers
                 self._redis.publish(self.CHANNEL, line)
+                # Also store in list for dashboard retrieval
+                self._redis.rpush(self.LOG_KEY, line)
+                # Trim to prevent unbounded growth
+                self._redis.ltrim(self.LOG_KEY, -self.MAX_LOG_ENTRIES, -1)
             except Exception:
                 pass  # Don't fail on Redis errors
 

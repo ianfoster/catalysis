@@ -133,49 +133,71 @@ def main():
         st.error(f"Failed to import agent classes: {e}")
         return
 
-    # Agent Status Section
+    # Agent Status Section - Compact view
     st.header("🤖 Agent Status", anchor="agents")
 
-    cols = st.columns(3)
+    # Collect all agent statuses first
+    agent_statuses = []
+    for type_name, agent_class in agent_types.items():
+        try:
+            agent_ids = run_async(discover_agents(exchange_factory, agent_class))
+            for agent_id in agent_ids:
+                try:
+                    status = run_async(query_agent(
+                        exchange_factory, agent_id, "get_status", {}
+                    ))
+                    status["_type"] = type_name
+                    status["_id"] = str(agent_id)[:12]
+                    agent_statuses.append(status)
+                except Exception:
+                    agent_statuses.append({
+                        "_type": type_name,
+                        "_id": str(agent_id)[:12],
+                        "ready": False,
+                        "error": "timeout"
+                    })
+        except Exception:
+            pass
 
-    for idx, (type_name, agent_class) in enumerate(agent_types.items()):
-        col = cols[idx % 3]
+    # Display as compact table
+    if agent_statuses:
+        table_data = []
+        for s in agent_statuses:
+            ready = s.get("ready", s.get("ok", False))
+            icon = "🟢" if ready else "🔴"
+            actions = s.get("total_actions", 0)
+            time_s = s.get("total_time_s", 0)
+            extra = ""
+            if s.get("model"):
+                extra = s["model"][:20]
+            elif s.get("device"):
+                extra = s["device"]
+            table_data.append({
+                "": icon,
+                "Agent": s["_type"].replace("Agent", ""),
+                "Actions": actions,
+                "Time": f"{time_s:.1f}s" if time_s else "-",
+                "Info": extra,
+            })
+        st.dataframe(table_data, hide_index=True, use_container_width=True)
+    else:
+        st.warning("No agents found")
 
-        with col:
-            try:
-                agent_ids = run_async(discover_agents(exchange_factory, agent_class))
-            except Exception as e:
-                st.error(f"{type_name}: Connection error")
-                continue
-
-            if not agent_ids:
-                st.info(f"**{type_name}**: No agents")
-                continue
-
-            with st.expander(f"**{type_name}** ({len(agent_ids)})", expanded=True):
-                for agent_id in agent_ids:
-                    try:
-                        status = run_async(query_agent(
-                            exchange_factory, agent_id, "get_status", {}
-                        ))
-
-                        ready = status.get("ready", False)
-                        status_icon = "🟢" if ready else "🔴"
-
-                        st.markdown(f"{status_icon} `{str(agent_id)[:20]}...`")
-
-                        # Show key metrics
-                        if "total_actions" in status:
-                            st.metric("Actions", status["total_actions"])
-                        if "total_time_s" in status:
-                            st.metric("Total Time", f"{status['total_time_s']:.1f}s")
-                        if "model" in status:
-                            st.caption(f"Model: {status['model']}")
-                        if "device" in status:
-                            st.caption(f"Device: {status['device']}")
-
-                    except Exception as e:
-                        st.warning(f"Agent timeout: {str(agent_id)[:20]}")
+    # Detailed view in expander
+    with st.expander("Agent Details", expanded=False):
+        cols = st.columns(4)
+        for idx, status in enumerate(agent_statuses):
+            col = cols[idx % 4]
+            with col:
+                ready = status.get("ready", status.get("ok", False))
+                icon = "🟢" if ready else "🔴"
+                st.markdown(f"{icon} **{status['_type'].replace('Agent', '')}**")
+                if status.get("total_actions"):
+                    st.caption(f"Actions: {status['total_actions']}")
+                if status.get("model"):
+                    st.caption(f"{status['model'][:25]}")
+                if status.get("device"):
+                    st.caption(f"Device: {status['device']}")
 
     # History Section
     st.header("📜 Recent Activity")
@@ -292,20 +314,38 @@ def main():
     else:
         st.info("No results file found. Run the generator first.")
 
-    # Narrative Section
+    # Narrative Section - Try Redis first, fall back to file
     st.header("📖 Narrative Log", anchor="narrative")
 
-    narrative_file = project_root / "data" / "narrative.log"
-    if narrative_file.exists():
-        with open(narrative_file) as f:
-            lines = f.readlines()
+    n_lines = st.slider("Show last N lines", 10, 200, 50, key="narrative_lines")
 
-        if lines:
-            # Show last N lines
-            n_lines = st.slider("Show last N lines", 10, 100, 30, key="narrative_lines")
-            st.code("".join(lines[-n_lines:]), language=None)
-        else:
-            st.info("Narrative log is empty")
+    narrative_lines = []
+
+    # Try to get from Redis
+    try:
+        import redis
+        r = redis.Redis(host=redis_host, port=redis_port, decode_responses=True)
+        # Get recent narrative entries from Redis list
+        narrative_lines = r.lrange("narrative:log", -n_lines, -1)
+        if narrative_lines:
+            st.success(f"Live from Redis ({len(narrative_lines)} entries)")
+    except Exception:
+        pass
+
+    # Fall back to local file
+    if not narrative_lines:
+        narrative_file = project_root / "data" / "narrative.log"
+        if narrative_file.exists():
+            with open(narrative_file) as f:
+                all_lines = f.readlines()
+            narrative_lines = all_lines[-n_lines:] if all_lines else []
+            if narrative_lines:
+                st.info("From local file (not live)")
+
+    if narrative_lines:
+        # Show newest first
+        narrative_lines = list(reversed(narrative_lines))
+        st.code("".join(line if line.endswith('\n') else line + '\n' for line in narrative_lines), language=None)
     else:
         st.info("No narrative log found")
 
