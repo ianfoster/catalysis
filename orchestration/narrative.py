@@ -100,7 +100,7 @@ class NarrativeLogger:
         """Log proposed candidates."""
         self._write("")
         self._write(f"{self._loc()} GENERATOR: LLM proposed {len(candidates)} candidates")
-        self._write(f"   Reasoning: {reasoning[:100]}..." if len(reasoning) > 100 else f"   Reasoning: {reasoning}")
+        self._write(f"   Reasoning: {reasoning[:200]}..." if len(reasoning) > 200 else f"   Reasoning: {reasoning}")
         for i, c in enumerate(candidates, 1):
             metals = c.get("metals", [])
             metal_str = "/".join(f"{m['element']}{m['wt_pct']}" for m in metals)
@@ -126,7 +126,7 @@ class NarrativeLogger:
         """Log shepherd's decision."""
         self._write("")
         self._write(f"{self._loc()}    LLM Decision: Run '{test_name}' (cost: {cost})")
-        self._write(f"      Reasoning: {reasoning[:100]}..." if len(reasoning) > 100 else f"      Reasoning: {reasoning}")
+        self._write(f"      Reasoning: {reasoning[:200]}..." if len(reasoning) > 200 else f"      Reasoning: {reasoning}")
 
     def shepherd_running_test(self, test_name: str, agent_name: str = None) -> None:
         """Log test execution start."""

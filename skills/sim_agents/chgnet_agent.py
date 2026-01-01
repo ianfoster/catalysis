@@ -5,25 +5,24 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from academy.agent import Agent, action
+from academy.agent import action
+from skills.base_agent import TrackedAgent
 
 logger = logging.getLogger(__name__)
 
 
-class CHGNetAgent(Agent):
+class CHGNetAgent(TrackedAgent):
     """Academy agent for CHGNet ML potential calculations.
 
     CHGNet is a universal ML potential trained on Materials Project data.
     Good for oxide and metal oxide systems.
+
+    Inherits from TrackedAgent for automatic history tracking.
     """
 
     def __init__(self, device: str = "cpu"):
-        """Initialize CHGNetAgent.
-
-        Args:
-            device: Compute device ("cpu" or "cuda")
-        """
-        super().__init__()
+        """Initialize CHGNetAgent."""
+        super().__init__(max_history=100)
         self._device = device
         self._model = None
         self._ready = False
@@ -47,47 +46,49 @@ class CHGNetAgent(Agent):
 
     @action
     async def screening(self, request: dict[str, Any]) -> dict[str, Any]:
-        """Run CHGNet single-point energy calculation.
+        """Run CHGNet single-point energy calculation."""
+        with self.track_action("screening", request) as tracker:
+            if not self._ready:
+                result = {"ok": False, "error": "CHGNet not ready"}
+                tracker.set_result(result)
+                return result
 
-        Args:
-            request: Dict with candidate specification
+            from chgnet.model.dynamics import CHGNetCalculator
+            import numpy as np
 
-        Returns:
-            Dict with energies and forces
-        """
-        if not self._ready:
-            return {"ok": False, "error": "CHGNet not ready"}
+            candidate = request.get("candidate", {})
+            slab = self._build_slab(candidate)
 
-        from chgnet.model.dynamics import CHGNetCalculator
-        import numpy as np
+            calc = CHGNetCalculator(model=self._model, use_device=self._device)
+            slab.calc = calc
 
-        candidate = request.get("candidate", {})
-        slab = self._build_slab(candidate)
+            energy = float(slab.get_potential_energy())
+            forces = slab.get_forces()
 
-        calc = CHGNetCalculator(model=self._model, use_device=self._device)
-        slab.calc = calc
-
-        energy = float(slab.get_potential_energy())
-        forces = slab.get_forces()
-
-        return {
-            "ok": True,
-            "method": "chgnet",
-            "total_energy_eV": round(energy, 6),
-            "energy_per_atom_eV": round(energy / len(slab), 6),
-            "max_force_eV_A": round(float(np.max(np.abs(forces))), 6),
-            "n_atoms": len(slab),
-            "E_ads_CO2_est": round(-0.3 - energy / len(slab) / 10, 4),
-            "E_ads_H_est": round(-0.25 - energy / len(slab) / 15, 4),
-        }
+            result = {
+                "ok": True,
+                "method": "chgnet",
+                "total_energy_eV": round(energy, 6),
+                "energy_per_atom_eV": round(energy / len(slab), 6),
+                "max_force_eV_A": round(float(np.max(np.abs(forces))), 6),
+                "n_atoms": len(slab),
+                "E_ads_CO2_est": round(-0.3 - energy / len(slab) / 10, 4),
+                "E_ads_H_est": round(-0.25 - energy / len(slab) / 15, 4),
+            }
+            tracker.set_result(result)
+            return result
 
     @action
     async def get_status(self, request: dict[str, Any]) -> dict[str, Any]:
-        """Get agent status."""
+        """Get agent status including history statistics."""
+        stats = self._get_statistics()
         return {
             "ok": True,
             "ready": self._ready,
             "device": self._device,
+            "total_actions": stats["total_actions"],
+            "total_time_s": stats["total_time_s"],
+            "action_counts": stats["action_counts"],
         }
 
     def _build_slab(self, candidate: dict[str, Any]):
