@@ -368,9 +368,9 @@ Examples:
     )
     parser.add_argument(
         "--device",
-        default="cpu",
-        choices=["cpu", "cuda"],
-        help="Compute device for ML agents (default: cpu)",
+        default="auto",
+        choices=["cpu", "cuda", "auto"],
+        help="Compute device for ML agents (default: auto-detect)",
     )
     parser.add_argument(
         "--exchange-url",
@@ -428,9 +428,24 @@ Examples:
         if args.budget == 100.0 and "budget_per_candidate" in shepherds_config:
             args.budget = shepherds_config["budget_per_candidate"]
 
+    # Auto-detect GPU if requested
+    device = args.device
+    if device == "auto":
+        try:
+            import torch
+            if torch.cuda.is_available():
+                device = "cuda"
+                logging.info(f"Auto-detected GPU: {torch.cuda.get_device_name(0)}")
+            else:
+                device = "cpu"
+                logging.info("No GPU detected, using CPU")
+        except ImportError:
+            device = "cpu"
+            logging.info("PyTorch not available, using CPU")
+
     if args.test:
         # Quick test mode
-        asyncio.run(test_agents(args.agents, args.device))
+        asyncio.run(test_agents(args.agents, device))
     else:
         # Full agent mode
         asyncio.run(run_agents(
@@ -439,7 +454,7 @@ Examples:
             agent_names=args.agents,
             num_shepherds=args.num_shepherds,
             budget=args.budget,
-            device=args.device,
+            device=device,
             exchange_url=args.exchange_url,
             redis_host=args.redis_host,
             redis_port=args.redis_port,

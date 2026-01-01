@@ -58,7 +58,7 @@ AVAILABLE_TESTS: dict[str, TestSpec] = {
     "fast_surrogate": TestSpec(
         name="fast_surrogate",
         description=(
-            "Quick ML surrogate prediction (~1s). "
+            "Quick surrogate prediction (~1s). SURROGATE - uses simple formulas. "
             "Returns CO2 conversion, methanol selectivity, and space-time yield (STY). "
             "Low cost, good for initial screening. Does not reduce uncertainty."
         ),
@@ -78,7 +78,7 @@ AVAILABLE_TESTS: dict[str, TestSpec] = {
         description=(
             "ML potential screening with MACE (~10s). "
             "Returns total energy, energy per atom, and maximum force. "
-            "Fast and accurate for initial structure evaluation."
+            "Fast and accurate for initial structure evaluation. REAL PHYSICS."
         ),
         cost=0.5,
         endpoint="cheap",
@@ -91,10 +91,28 @@ AVAILABLE_TESTS: dict[str, TestSpec] = {
         simulation_method="mace",
         method_status="available",
     ),
+    "chgnet_screening": TestSpec(
+        name="chgnet_screening",
+        description=(
+            "ML potential screening with CHGNet (~10s). "
+            "Alternative to MACE, good for oxides. "
+            "Use for cross-validation or when MACE unavailable. REAL PHYSICS."
+        ),
+        cost=0.5,
+        endpoint="cheap",
+        prerequisites=(),
+        timeout=120,
+        outputs=("total_energy_eV", "energy_per_atom_eV", "max_force_eV_A"),
+        reduces_uncertainty=True,
+        expected_runtime_s=10,
+        gc_function="chgnet_screening",
+        simulation_method="chgnet",
+        method_status="available",
+    ),
     "ml_relaxation": TestSpec(
         name="ml_relaxation",
         description=(
-            "ML potential structure relaxation with MACE (~60s). "
+            "ML potential structure relaxation with MACE (~60s). REAL PHYSICS. "
             "Relaxes atomic positions to minimize energy. "
             "Returns converged energy and structure."
         ),
@@ -112,7 +130,7 @@ AVAILABLE_TESTS: dict[str, TestSpec] = {
     "microkinetic_lite": TestSpec(
         name="microkinetic_lite",
         description=(
-            "Lite microkinetic analysis (~60s). "
+            "Lite microkinetic analysis (~60s). SURROGATE - uses simple formulas. "
             "Returns rate-limiting step (RLS), temperature sensitivity, pressure sensitivity. "
             "Medium cost. Reduces prediction uncertainty."
         ),
@@ -130,9 +148,9 @@ AVAILABLE_TESTS: dict[str, TestSpec] = {
     "dft_adsorption": TestSpec(
         name="dft_adsorption",
         description=(
-            "DFT adsorption energy calculation with Quantum ESPRESSO (~1h). "
-            "Returns CO2 and H adsorption energies with high accuracy. "
-            "High cost. Significantly reduces uncertainty."
+            "DFT adsorption energy calculation. SURROGATE - QE not configured. "
+            "Returns estimated CO2 and H adsorption energies. "
+            "High cost. Would reduce uncertainty if real DFT."
         ),
         cost=10.0,  # Reduced from 100 for testing
         endpoint="gpu",
@@ -143,14 +161,14 @@ AVAILABLE_TESTS: dict[str, TestSpec] = {
         expected_runtime_s=3600,
         gc_function="dft_qe",
         simulation_method="quantum_espresso",
-        method_status="available",
+        method_status="surrogate",
     ),
     "openmm_relaxation": TestSpec(
         name="openmm_relaxation",
         description=(
-            "OpenMM structure relaxation (~5min). "
-            "Optimizes catalyst surface structure using molecular mechanics. "
-            "Medium cost, benefits from GPU."
+            "OpenMM structure relaxation (~5min). SURROGATE - no force field for catalysts. "
+            "Returns approximate relaxed energy and structure RMSD. "
+            "Medium cost."
         ),
         cost=5.0,
         endpoint="gpu",
@@ -161,12 +179,12 @@ AVAILABLE_TESTS: dict[str, TestSpec] = {
         expected_runtime_s=300,
         gc_function="openmm_relaxation",
         simulation_method="openmm",
-        method_status="available",
+        method_status="surrogate",
     ),
     "stability_analysis": TestSpec(
         name="stability_analysis",
         description=(
-            "Thermodynamic stability analysis (~30s). "
+            "Thermodynamic stability analysis (~30s). SURROGATE - heuristic model. "
             "Estimates catalyst stability under reaction conditions. "
             "Low cost. Useful for identifying unstable candidates early."
         ),
@@ -179,14 +197,13 @@ AVAILABLE_TESTS: dict[str, TestSpec] = {
         expected_runtime_s=30,
         gc_function="stability_analysis",
         simulation_method="surrogate",
-        method_status="available",
+        method_status="surrogate",
     ),
     "cantera_reactor": TestSpec(
         name="cantera_reactor",
         description=(
-            "Cantera reactor simulation (~30s). "
-            "Simulates reactor performance under operating conditions. "
-            "Returns conversion, selectivity, and product distribution."
+            "Cantera reactor simulation (~30s). SURROGATE - no methanol mechanism. "
+            "Returns approximate conversion, selectivity, and yield. "
         ),
         cost=1.0,
         endpoint="cheap",

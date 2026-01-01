@@ -62,7 +62,7 @@ generator:
     api_key_env: "OPENAI_API_KEY"
 
   generation:
-    candidates_per_iteration: 6
+    candidates_per_iteration: 15
     max_iterations: 20
 
   convergence:

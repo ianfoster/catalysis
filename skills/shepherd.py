@@ -735,13 +735,13 @@ class ShepherdAgent(TrackedAgent):
             "fast_surrogate": ("surrogate", "screening"),
             "ml_screening": ("mace", "screening"),
             "ml_relaxation": ("mace", "relaxation"),
+            "chgnet_screening": ("chgnet", "screening"),
             "microkinetic_lite": ("surrogate", "microkinetic"),
             "dft_adsorption": ("qe", "adsorption"),
             "stability_analysis": ("stability", "analyze"),
             "cantera_reactor": ("cantera", "reactor"),
             "cantera_sensitivity": ("cantera", "sensitivity"),
             "openmm_relaxation": ("openmm", "relaxation"),
-            "chgnet_screening": ("chgnet", "screening"),
         }
 
         agent_name, action_name = dispatch_mapping.get(test_name, ("surrogate", "screening"))

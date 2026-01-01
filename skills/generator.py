@@ -443,40 +443,50 @@ class GeneratorAgent(TrackedAgent):
 
         logger.info("Found %d ShepherdAgents on exchange", len(shepherd_ids))
 
-        # Use round-robin to distribute candidates across shepherds
+        # Evaluate candidates in PARALLEL using all available shepherds
         narrative = get_narrative()
-        results = []
-        for i, candidate in enumerate(candidates):
-            # Pick a shepherd (round-robin)
-            shepherd_id = shepherd_ids[i % len(shepherd_ids)]
-            shepherd = Handle(shepherd_id)
+        num_shepherds = len(shepherd_ids)
 
-            logger.info("Sending %s to ShepherdAgent %s", candidate_to_str(candidate), shepherd_id)
-            narrative.generator_dispatching(candidate, str(shepherd_id), "Spark")
+        # Semaphore limits concurrent evaluations to number of shepherds
+        semaphore = asyncio.Semaphore(num_shepherds)
 
-            try:
-                # Call evaluate action on remote shepherd
-                result = await asyncio.wait_for(
-                    shepherd.evaluate({
-                        "candidate": candidate,
-                        "budget": budget,
-                    }),
-                    timeout=timeout,
-                )
-                results.append(result)
+        async def evaluate_one(i: int, candidate: dict) -> dict:
+            """Evaluate a single candidate with semaphore-limited concurrency."""
+            async with semaphore:
+                # Pick a shepherd (round-robin based on position)
+                shepherd_id = shepherd_ids[i % num_shepherds]
+                shepherd = Handle(shepherd_id)
 
-                score = result.get("final_assessment", {}).get("viability_score", 0)
-                logger.info("Completed: %s (score: %d)", candidate_to_str(candidate), score)
-                narrative.generator_received_result(candidate, score, "Spark")
+                logger.info("Sending %s to ShepherdAgent %s", candidate_to_str(candidate), shepherd_id)
+                narrative.generator_dispatching(candidate, str(shepherd_id), "Spark")
 
-            except asyncio.TimeoutError:
-                logger.error("Timeout evaluating: %s", candidate_to_str(candidate))
-                results.append({"candidate": candidate, "error": "timeout", "ok": False})
-            except Exception as e:
-                logger.error("Error evaluating %s: %s", candidate_to_str(candidate), e)
-                results.append({"candidate": candidate, "error": str(e), "ok": False})
+                try:
+                    result = await asyncio.wait_for(
+                        shepherd.evaluate({
+                            "candidate": candidate,
+                            "budget": budget,
+                        }),
+                        timeout=timeout,
+                    )
 
-        return results
+                    score = result.get("final_assessment", {}).get("viability_score", 0)
+                    logger.info("Completed: %s (score: %d)", candidate_to_str(candidate), score)
+                    narrative.generator_received_result(candidate, score, "Spark")
+                    return result
+
+                except asyncio.TimeoutError:
+                    logger.error("Timeout evaluating: %s", candidate_to_str(candidate))
+                    return {"candidate": candidate, "error": "timeout", "ok": False}
+                except Exception as e:
+                    logger.error("Error evaluating %s: %s", candidate_to_str(candidate), e)
+                    return {"candidate": candidate, "error": str(e), "ok": False}
+
+        # Launch all evaluations in parallel (semaphore limits active ones)
+        logger.info("Launching %d parallel evaluations (max %d concurrent)", len(candidates), num_shepherds)
+        tasks = [evaluate_one(i, c) for i, c in enumerate(candidates)]
+        results = await asyncio.gather(*tasks)
+
+        return list(results)
 
     async def _check_llm_convergence(self) -> bool:
         """Ask LLM whether to continue or stop.
