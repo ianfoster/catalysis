@@ -133,8 +133,9 @@ class ShepherdAgent(TrackedAgent):
 
     async def agent_on_startup(self) -> None:
         """Initialize resources after agent starts."""
-        # Get system prompt with capabilities
-        self._system_prompt = get_system_prompt(include_capabilities=True)
+        # Get system prompt WITHOUT capabilities (they confuse the LLM about test names)
+        # The valid test names are already in the reasoning prompt
+        self._system_prompt = get_system_prompt(include_capabilities=False)
 
         # Initialize LLM client (four options)
         if self._use_llm_agent:

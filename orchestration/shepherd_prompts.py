@@ -45,7 +45,10 @@ REASONING_PROMPT = """\
 {candidate_json}
 ```
 
-## Available Tests (choose ONLY from tests marked [available] or [surrogate])
+## VALID TEST NAMES (you MUST use one of these exact names)
+{valid_test_names}
+
+## Available Tests
 {tests_table}
 
 ## Tests Already Completed
@@ -67,11 +70,11 @@ Options:
 2. Stop and provide a final assessment (if confident enough or budget exhausted)
 
 IMPORTANT RULES:
-- DO NOT re-run tests listed in "Tests Already Completed" - they CANNOT be repeated
-- ONLY choose tests marked [available] or [surrogate] in the table above
+- You MUST use an exact test name from the VALID TEST NAMES list above
+- DO NOT re-run tests listed in "Tests Already Completed"
 - Each test can only be run ONCE per candidate
 - If all affordable tests are [DONE], you MUST choose action "stop"
-- Do NOT invent test names - only use exact names from the Available Tests table
+- NEVER invent or modify test names - use ONLY the exact names listed
 
 Consider:
 - Have you run the minimum tests needed to assess this candidate?
@@ -190,6 +193,8 @@ def build_reasoning_prompt(
     Returns:
         Formatted prompt string
     """
+    from orchestration.test_registry import AVAILABLE_TESTS
+
     completed_tests = {r["test"] for r in results if r.get("result", {}).get("ok", True)}
     budget_remaining = budget_total - budget_spent
 
@@ -199,8 +204,12 @@ def build_reasoning_prompt(
     else:
         completed_list = "None yet"
 
+    # Build explicit list of valid test names
+    valid_test_names = ", ".join(sorted(AVAILABLE_TESTS.keys()))
+
     return REASONING_PROMPT.format(
         candidate_json=format_candidate(candidate),
+        valid_test_names=valid_test_names,
         tests_table=format_tests_for_prompt(completed_tests, budget_remaining),
         completed_list=completed_list,
         results_section=format_results(results),
