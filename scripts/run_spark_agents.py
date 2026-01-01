@@ -327,7 +327,7 @@ Examples:
     )
     parser.add_argument(
         "--llm-model",
-        default="meta-llama/Llama-3.1-8B-Instruct",
+        default="neuralmagic/Meta-Llama-3.1-70B-Instruct-FP8",
         help="LLM model name",
     )
     parser.add_argument(
