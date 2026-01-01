@@ -130,7 +130,7 @@ AVAILABLE_TESTS: dict[str, TestSpec] = {
             "Returns CO2 and H adsorption energies with high accuracy. "
             "High cost. Significantly reduces uncertainty."
         ),
-        cost=100.0,
+        cost=10.0,  # Reduced from 100 for testing
         endpoint="gpu",
         prerequisites=(),  # Removed temporarily
         timeout=7200,

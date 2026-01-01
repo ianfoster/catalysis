@@ -65,6 +65,8 @@ class ShepherdAgent(Agent):
         sim_agents: dict[str, Any] | None = None,
         llm_url: str | None = None,
         llm_model: str | None = None,
+        redis_host: str | None = None,
+        redis_port: int = 6379,
     ):
         """Initialize ShepherdAgent.
 
@@ -89,10 +91,14 @@ class ShepherdAgent(Agent):
                 Useful when vLLM is running on Spark and accessible via tunnel.
             llm_model: Model name for direct vLLM connection.
                 Defaults to "meta-llama/Meta-Llama-3-8B-Instruct".
+            redis_host: Redis hostname for distributed narrative logging.
+            redis_port: Redis port (default 6379).
         """
         super().__init__()
         self._config = config
         self._gc_function_map = gc_function_map or {}
+        self._redis_host = redis_host
+        self._redis_port = redis_port
 
         # Academy agent mode
         self._llm_agent = llm_agent
@@ -228,7 +234,7 @@ class ShepherdAgent(Agent):
             budget_total,
         )
 
-        narrative = get_narrative()
+        narrative = get_narrative(redis_host=self._redis_host, redis_port=self._redis_port)
         narrative.shepherd_start(candidate, budget_total)
 
         results: list[dict[str, Any]] = []

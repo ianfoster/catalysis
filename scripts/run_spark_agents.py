@@ -218,6 +218,8 @@ async def run_agents(
                     "sim_agents": sim_agents,  # Pass individual agents
                     "llm_url": llm_url,
                     "llm_model": llm_model,
+                    "redis_host": redis_host,
+                    "redis_port": redis_port,
                 },
             )
             shepherds.append(shepherd)

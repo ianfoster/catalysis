@@ -1,6 +1,7 @@
 """Narrative logger for catalyst discovery.
 
 Captures a human-readable story of the discovery process.
+Supports Redis pub/sub for distributed logging across machines.
 """
 
 import json
@@ -20,20 +21,51 @@ def get_hostname() -> str:
 
 
 class NarrativeLogger:
-    """Logs a human-readable narrative of the discovery process."""
+    """Logs a human-readable narrative of the discovery process.
 
-    def __init__(self, path: str = "data/narrative.log"):
+    Can optionally publish to Redis for distributed visibility.
+    """
+
+    CHANNEL = "catalyst:narrative"
+
+    def __init__(
+        self,
+        path: str = "data/narrative.log",
+        redis_host: str | None = None,
+        redis_port: int = 6379,
+    ):
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        # Start fresh
+        # Start fresh for local file
         self._path.write_text("")
         self._hostname = get_hostname()
 
+        # Redis pub/sub setup
+        self._redis = None
+        if redis_host:
+            try:
+                import redis
+                self._redis = redis.Redis(host=redis_host, port=redis_port, decode_responses=True)
+                self._redis.ping()  # Test connection
+            except Exception as e:
+                print(f"Warning: Could not connect to Redis at {redis_host}:{redis_port}: {e}")
+                self._redis = None
+
     def _write(self, text: str) -> None:
-        """Append text to narrative log."""
+        """Append text to narrative log and optionally publish to Redis."""
         timestamp = datetime.now().strftime("%H:%M:%S")
+        line = f"[{timestamp}] {text}"
+
+        # Write to local file
         with open(self._path, "a") as f:
-            f.write(f"[{timestamp}] {text}\n")
+            f.write(line + "\n")
+
+        # Publish to Redis if connected
+        if self._redis:
+            try:
+                self._redis.publish(self.CHANNEL, line)
+            except Exception:
+                pass  # Don't fail on Redis errors
 
     def _loc(self, location: str = None) -> str:
         """Format location tag."""
@@ -56,7 +88,7 @@ class NarrativeLogger:
     def generator_proposing(self, top_performers: list[dict]) -> None:
         """Log generator proposing candidates."""
         self._write("")
-        self._write(f"{self._loc()} 📤 GENERATOR: Asking LLM to propose new candidates...")
+        self._write(f"{self._loc()} GENERATOR: Asking LLM to propose new candidates...")
         if top_performers:
             self._write(f"   Context: {len(top_performers)} top performers from previous iterations")
             best = top_performers[0] if top_performers else {}
@@ -67,7 +99,7 @@ class NarrativeLogger:
     def generator_proposed(self, candidates: list[dict], reasoning: str) -> None:
         """Log proposed candidates."""
         self._write("")
-        self._write(f"{self._loc()} 📥 GENERATOR: LLM proposed {len(candidates)} candidates")
+        self._write(f"{self._loc()} GENERATOR: LLM proposed {len(candidates)} candidates")
         self._write(f"   Reasoning: {reasoning[:100]}..." if len(reasoning) > 100 else f"   Reasoning: {reasoning}")
         for i, c in enumerate(candidates, 1):
             metals = c.get("metals", [])
@@ -81,27 +113,27 @@ class NarrativeLogger:
         candidate_str = f"{metal_str} on {candidate.get('support', '?')}"
 
         self._write("")
-        self._write(f"{self._loc()} 🐑 SHEPHERD: Starting evaluation of {candidate_str}")
+        self._write(f"{self._loc()} SHEPHERD: Starting evaluation of {candidate_str}")
         self._write(f"   Budget: {budget} units")
 
     def shepherd_thinking(self, prompt_summary: str) -> None:
         """Log shepherd asking LLM for next action."""
         self._write("")
-        self._write(f"{self._loc()}    🤔 Shepherd asking LLM: What test should I run next?")
+        self._write(f"{self._loc()}    Shepherd asking LLM: What test should I run next?")
         self._write(f"      Context: {prompt_summary[:80]}...")
 
     def shepherd_decision(self, test_name: str, reasoning: str, cost: float) -> None:
         """Log shepherd's decision."""
         self._write("")
-        self._write(f"{self._loc()}    💡 LLM Decision: Run '{test_name}' (cost: {cost})")
+        self._write(f"{self._loc()}    LLM Decision: Run '{test_name}' (cost: {cost})")
         self._write(f"      Reasoning: {reasoning[:100]}..." if len(reasoning) > 100 else f"      Reasoning: {reasoning}")
 
     def shepherd_running_test(self, test_name: str, agent_name: str = None) -> None:
         """Log test execution start."""
         if agent_name:
-            self._write(f"{self._loc()}    ⚙️  Dispatching '{test_name}' to {agent_name} agent...")
+            self._write(f"{self._loc()}    Dispatching '{test_name}' to {agent_name} agent...")
         else:
-            self._write(f"{self._loc()}    ⚙️  Running test '{test_name}'...")
+            self._write(f"{self._loc()}    Running test '{test_name}'...")
 
     def shepherd_test_result(self, test_name: str, result: dict, elapsed: float = None) -> None:
         """Log test result."""
@@ -112,7 +144,7 @@ class NarrativeLogger:
                 key_metrics.append(f"{k}={v:.3f}" if isinstance(v, float) else f"{k}={v}")
 
         elapsed_str = f" ({elapsed:.1f}s)" if elapsed else ""
-        self._write(f"{self._loc()}    ✓ Test '{test_name}' complete{elapsed_str}")
+        self._write(f"{self._loc()}    Test '{test_name}' complete{elapsed_str}")
         if key_metrics:
             self._write(f"      Results: {', '.join(key_metrics[:5])}")
 
@@ -123,7 +155,7 @@ class NarrativeLogger:
         candidate_str = f"{metal_str} on {candidate.get('support', '?')}"
 
         self._write("")
-        self._write(f"{self._loc()} 🏁 SHEPHERD: Evaluation complete for {candidate_str}")
+        self._write(f"{self._loc()} SHEPHERD: Evaluation complete for {candidate_str}")
         self._write(f"   Final Score: {final_score}")
         self._write(f"   Recommendation: {recommendation}")
         self._write(f"   Tests run: {tests_run}, Total cost: {total_cost:.1f}")
@@ -135,7 +167,7 @@ class NarrativeLogger:
         candidate_str = f"{metal_str} on {candidate.get('support', '?')}"
 
         self._write("")
-        self._write(f"{self._loc()} 📤 Dispatching {candidate_str} to ShepherdAgent on {target_host}")
+        self._write(f"{self._loc()} Dispatching {candidate_str} to ShepherdAgent on {target_host}")
         self._write(f"   Shepherd ID: {shepherd_id}")
 
     def generator_received_result(self, candidate: dict, score: float, from_host: str = "Spark") -> None:
@@ -144,7 +176,7 @@ class NarrativeLogger:
         metal_str = "/".join(f"{m['element']}{m['wt_pct']}" for m in metals)
         candidate_str = f"{metal_str} on {candidate.get('support', '?')}"
 
-        self._write(f"{self._loc()} 📥 Received result for {candidate_str} from {from_host}: score={score}")
+        self._write(f"{self._loc()} Received result for {candidate_str} from {from_host}: score={score}")
 
     def generator_iteration_done(self, iteration: int, results: list[dict]) -> None:
         """Log iteration completion."""
@@ -153,7 +185,7 @@ class NarrativeLogger:
         best_score = max(scores) if scores else 0
 
         self._write("")
-        self._write(f"{self._loc()} 📊 ITERATION {iteration} COMPLETE")
+        self._write(f"{self._loc()} ITERATION {iteration} COMPLETE")
         self._write(f"   Candidates evaluated: {len(results)}")
         self._write(f"   Average score: {avg_score:.1f}")
         self._write(f"   Best score this iteration: {best_score}")
@@ -170,16 +202,44 @@ class NarrativeLogger:
 _narrative: NarrativeLogger | None = None
 
 
-def get_narrative(path: str = "data/narrative.log") -> NarrativeLogger:
+def get_narrative(
+    path: str = "data/narrative.log",
+    redis_host: str | None = None,
+    redis_port: int = 6379,
+) -> NarrativeLogger:
     """Get or create the global narrative logger."""
     global _narrative
     if _narrative is None:
-        _narrative = NarrativeLogger(path)
+        _narrative = NarrativeLogger(path, redis_host=redis_host, redis_port=redis_port)
     return _narrative
 
 
-def reset_narrative(path: str = "data/narrative.log") -> NarrativeLogger:
+def reset_narrative(
+    path: str = "data/narrative.log",
+    redis_host: str | None = None,
+    redis_port: int = 6379,
+) -> NarrativeLogger:
     """Reset and return a fresh narrative logger."""
     global _narrative
-    _narrative = NarrativeLogger(path)
+    _narrative = NarrativeLogger(path, redis_host=redis_host, redis_port=redis_port)
     return _narrative
+
+
+def subscribe_narrative(redis_host: str, redis_port: int = 6379) -> None:
+    """Subscribe to narrative events from Redis and print them.
+
+    This is a blocking function that prints all narrative events.
+    Run this in a separate terminal to watch the distributed narrative.
+    """
+    import redis
+
+    r = redis.Redis(host=redis_host, port=redis_port, decode_responses=True)
+    pubsub = r.pubsub()
+    pubsub.subscribe(NarrativeLogger.CHANNEL)
+
+    print(f"Subscribed to {NarrativeLogger.CHANNEL} on {redis_host}:{redis_port}")
+    print("Waiting for narrative events...\n")
+
+    for message in pubsub.listen():
+        if message["type"] == "message":
+            print(message["data"])

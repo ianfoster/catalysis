@@ -301,6 +301,8 @@ async def main() -> int:
                     "config": generator_config,
                     "shepherd_config": shepherd_config,
                     "gc_function_map": gc_function_map,
+                    "redis_host": args.redis_host,
+                    "redis_port": args.redis_port,
                 },
             )
 

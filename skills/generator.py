@@ -71,6 +71,8 @@ class GeneratorAgent(Agent):
         gc_function_map: dict[str, str] | None = None,
         gc_endpoint: str | None = None,
         llm_url: str | None = None,
+        redis_host: str | None = None,
+        redis_port: int = 6379,
     ):
         """Initialize GeneratorAgent.
 
@@ -85,6 +87,8 @@ class GeneratorAgent(Agent):
             gc_function_map: Globus Compute function mappings for simulations
             gc_endpoint: Globus Compute endpoint ID for running Shepherds on Spark
             llm_url: URL to shared LLM server on Spark (e.g., "http://localhost:8080/v1")
+            redis_host: Redis hostname for distributed narrative logging
+            redis_port: Redis port (default 6379)
         """
         if ACADEMY_AVAILABLE:
             super().__init__()
@@ -93,6 +97,8 @@ class GeneratorAgent(Agent):
         self._gc_function_map = gc_function_map or {}
         self._gc_endpoint = gc_endpoint
         self._llm_url = llm_url
+        self._redis_host = redis_host
+        self._redis_port = redis_port
 
         # Initialized in agent_on_startup / run()
         self._llm: LLMClient | None = None
@@ -199,8 +205,11 @@ class GeneratorAgent(Agent):
             candidates_per_iter,
         )
 
-        # Reset narrative log for fresh run
-        narrative = reset_narrative()
+        # Reset narrative log for fresh run (with Redis pub/sub for distributed visibility)
+        narrative = reset_narrative(
+            redis_host=self._redis_host,
+            redis_port=self._redis_port,
+        )
 
         while not shutdown.is_set() and self._running:
             iteration = self._state.iteration
