@@ -137,11 +137,20 @@ class NarrativeLogger:
 
     def shepherd_test_result(self, test_name: str, result: dict, elapsed: float = None) -> None:
         """Log test result."""
-        # Extract key metrics
+        # Extract key metrics (skip internal fields)
         key_metrics = []
+        skip_keys = {"ok", "cost", "elapsed_s", "error"}
         for k, v in result.items():
-            if isinstance(v, (int, float)) and k not in ("ok", "cost"):
-                key_metrics.append(f"{k}={v:.3f}" if isinstance(v, float) else f"{k}={v}")
+            if k in skip_keys:
+                continue
+            if isinstance(v, float):
+                key_metrics.append(f"{k}={v:.3f}")
+            elif isinstance(v, int):
+                key_metrics.append(f"{k}={v}")
+
+        # Use elapsed from result if not passed explicitly
+        if elapsed is None:
+            elapsed = result.get("elapsed_s")
 
         elapsed_str = f" ({elapsed:.1f}s)" if elapsed else ""
         self._write(f"{self._loc()}    Test '{test_name}' complete{elapsed_str}")

@@ -295,8 +295,14 @@ class ShepherdAgent(Agent):
                     results.append({"test": test_name, "result": {"error": error_msg, "ok": False}, "cost": 0})
                     continue
 
-                # Check prerequisites
+                # Check if test already completed (prevent re-running)
                 completed_tests = {r["test"] for r in results if r.get("result", {}).get("ok", True)}
+                if test_name in completed_tests:
+                    logger.warning("Test %s already completed, skipping re-run", test_name)
+                    error_msg = f"Test '{test_name}' already completed - choose a different test or stop"
+                    history[-1]["error"] = error_msg
+                    results.append({"test": test_name, "result": {"error": error_msg, "ok": False, "already_run": True}, "cost": 0})
+                    continue
                 satisfied, missing = check_prerequisites(test_name, completed_tests)
                 if not satisfied:
                     logger.warning(
@@ -597,10 +603,16 @@ class ShepherdAgent(Agent):
         if not action_method:
             raise RuntimeError(f"Agent {agent_name} has no action '{action_name}'")
 
-        # Call the action
+        # Call the action with timing
+        t0 = time.time()
         result = await action_method({
             "candidate": candidate,
         })
+        elapsed = time.time() - t0
+
+        # Add timing to result
+        result["elapsed_s"] = round(elapsed, 2)
+        logger.info("Completed %s.%s in %.2fs", agent_name, action_name, elapsed)
 
         if not result.get("ok"):
             raise RuntimeError(f"{agent_name}.{action_name} error: {result.get('error')}")

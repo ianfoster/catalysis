@@ -63,6 +63,11 @@ Options:
 1. Run another test to gain more information (if budget allows and prerequisites met)
 2. Stop and provide a final assessment (if confident enough or budget exhausted)
 
+IMPORTANT RULES:
+- DO NOT re-run tests that are marked [DONE] - they cannot be repeated
+- Each test can only be run ONCE per candidate
+- If all useful tests are done or budget is low, you MUST stop
+
 Consider:
 - Have you run the minimum tests needed to assess this candidate?
 - Would additional tests meaningfully change your assessment?

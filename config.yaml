@@ -56,10 +56,10 @@ shepherd:
 generator:
   llm:
     mode: "shared"  # "shared" (same as shepherd) or "separate"
-    model: "meta-llama/Llama-3-70B-Instruct"  # Can use larger model
-    shared_url: "http://localhost:8000/v1"
-    local_url: "http://localhost:8000/v1"
-    api_key_env: null
+    model: "gpt-4o-mini"  # OpenAI model for Mac
+    shared_url: "https://api.openai.com/v1"
+    local_url: "https://api.openai.com/v1"
+    api_key_env: "OPENAI_API_KEY"
 
   generation:
     candidates_per_iteration: 6
