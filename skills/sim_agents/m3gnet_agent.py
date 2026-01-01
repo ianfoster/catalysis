@@ -28,7 +28,8 @@ class M3GNetAgent(TrackedAgent):
         self._m3gnet_available = False
         self._ase_available = False
         self._potential = None
-        self._calculator = None
+        self._calculator_class = None
+        self._use_matgl = False
 
     async def agent_on_startup(self) -> None:
         """Check M3GNet/MatGL/ASE availability and load model."""
@@ -47,14 +48,16 @@ class M3GNetAgent(TrackedAgent):
             import matgl
             logger.info(f"MatGL {matgl.__version__} found")
 
-            from matgl.ext.ase import M3GNetCalculator
-            logger.info("M3GNetCalculator imported")
+            # matgl 2.x uses PESCalculator
+            from matgl.ext.ase import PESCalculator
+            logger.info("PESCalculator imported")
 
             self._potential = matgl.load_model("M3GNet-MP-2021.2.8-PES")
             logger.info("M3GNet model loaded")
 
-            self._calculator = M3GNetCalculator
+            self._calculator_class = PESCalculator
             self._m3gnet_available = True
+            self._use_matgl = True
             logger.info("MatGL M3GNet ready")
         except ImportError as e:
             logger.warning(f"MatGL import failed: {e}")
@@ -62,8 +65,9 @@ class M3GNetAgent(TrackedAgent):
             try:
                 from m3gnet.models import M3GNet, Potential, M3GNetCalculator
                 self._potential = Potential(M3GNet.load())
-                self._calculator = M3GNetCalculator
+                self._calculator_class = M3GNetCalculator
                 self._m3gnet_available = True
+                self._use_matgl = False
                 logger.info("Legacy m3gnet model loaded")
             except ImportError as e2:
                 logger.error(f"Neither matgl nor m3gnet available: matgl={e}, m3gnet={e2}")
@@ -105,8 +109,13 @@ class M3GNetAgent(TrackedAgent):
                     symbols[surface_idx[i]] = "Zn"
                 slab.set_chemical_symbols(symbols)
 
-                # Create calculator (works for both matgl and legacy m3gnet)
-                calc = self._calculator(potential=self._potential)
+                # Create calculator - API differs between matgl and legacy m3gnet
+                if getattr(self, '_use_matgl', False):
+                    # matgl 2.x API
+                    calc = self._calculator_class(potential=self._potential)
+                else:
+                    # Legacy m3gnet API
+                    calc = self._calculator_class(potential=self._potential)
                 slab.calc = calc
                 energy = float(slab.get_potential_energy())
                 forces = slab.get_forces()
