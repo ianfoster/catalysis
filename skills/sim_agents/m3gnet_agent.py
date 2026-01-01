@@ -1,9 +1,8 @@
-"""M3GNetAgent - M3GNet ML potential calculations."""
+"""M3GNetAgent - M3GNet/MatGL ML potential calculations."""
 
 from __future__ import annotations
 
 import logging
-import time
 from typing import Any
 
 from academy.agent import action
@@ -17,6 +16,7 @@ class M3GNetAgent(TrackedAgent):
 
     MatErials 3-body Graph Network for materials properties.
     Provides fast ML-based energy and force predictions.
+    Uses matgl (the maintained successor to m3gnet).
 
     Inherits from TrackedAgent for automatic history tracking.
     """
@@ -28,9 +28,10 @@ class M3GNetAgent(TrackedAgent):
         self._m3gnet_available = False
         self._ase_available = False
         self._potential = None
+        self._calculator = None
 
     async def agent_on_startup(self) -> None:
-        """Check M3GNet/ASE availability and load model."""
+        """Check M3GNet/MatGL/ASE availability and load model."""
         logger.info(f"M3GNetAgent starting: device={self._device}")
 
         try:
@@ -41,15 +42,28 @@ class M3GNetAgent(TrackedAgent):
             logger.warning(f"ASE not available: {e}")
             return
 
+        # Try matgl first (newer, maintained)
         try:
-            from m3gnet.models import M3GNet, Potential
-            self._potential = Potential(M3GNet.load())
+            import matgl
+            from matgl.ext.ase import M3GNetCalculator
+            self._potential = matgl.load_model("M3GNet-MP-2021.2.8-PES")
+            self._calculator = M3GNetCalculator
             self._m3gnet_available = True
-            logger.info("M3GNet model loaded")
-        except ImportError as e:
-            logger.error(f"M3GNet not available: {e}")
+            logger.info(f"MatGL {matgl.__version__} loaded with M3GNet potential")
+        except ImportError:
+            # Fall back to old m3gnet
+            try:
+                from m3gnet.models import M3GNet, Potential, M3GNetCalculator
+                self._potential = Potential(M3GNet.load())
+                self._calculator = M3GNetCalculator
+                self._m3gnet_available = True
+                logger.info("Legacy m3gnet model loaded")
+            except ImportError as e:
+                logger.error(f"Neither matgl nor m3gnet available: {e}")
+            except Exception as e:
+                logger.error(f"Failed to load m3gnet model: {e}")
         except Exception as e:
-            logger.error(f"Failed to load M3GNet model: {e}")
+            logger.error(f"Failed to load MatGL model: {e}")
 
     @action
     async def screening(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -72,7 +86,6 @@ class M3GNetAgent(TrackedAgent):
 
             try:
                 from ase.build import fcc111
-                from m3gnet.models import M3GNetCalculator
                 import numpy as np
 
                 # Build Cu/Zn slab
@@ -85,7 +98,8 @@ class M3GNetAgent(TrackedAgent):
                     symbols[surface_idx[i]] = "Zn"
                 slab.set_chemical_symbols(symbols)
 
-                calc = M3GNetCalculator(potential=self._potential)
+                # Create calculator (works for both matgl and legacy m3gnet)
+                calc = self._calculator(potential=self._potential)
                 slab.calc = calc
                 energy = float(slab.get_potential_energy())
                 forces = slab.get_forces()

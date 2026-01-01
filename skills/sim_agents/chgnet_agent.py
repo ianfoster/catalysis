@@ -38,11 +38,12 @@ class CHGNetAgent(TrackedAgent):
             self._ready = True
             logger.info("CHGNet model loaded successfully")
         except ImportError as e:
-            logger.error(f"CHGNet not available: {e}")
-            raise
+            # CHGNet has ASE compatibility issues with newer versions
+            logger.warning(f"CHGNet not available (ASE compatibility issue): {e}")
+            self._ready = False
         except Exception as e:
-            logger.error(f"Failed to load CHGNet: {e}")
-            raise
+            logger.warning(f"Failed to load CHGNet: {e}")
+            self._ready = False
 
     @action
     async def screening(self, request: dict[str, Any]) -> dict[str, Any]:

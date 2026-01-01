@@ -51,7 +51,7 @@ sys.path.insert(0, str(project_root))
 import yaml
 
 
-# Map of agent names to their classes (11 agents total)
+# Map of agent names to their classes (11 sim agents + 1 LLM proxy)
 AGENT_CLASSES = {
     "mace": ("skills.sim_agents.mace_agent", "MACEAgent"),
     "chgnet": ("skills.sim_agents.chgnet_agent", "CHGNetAgent"),
@@ -64,6 +64,7 @@ AGENT_CLASSES = {
     "openmm": ("skills.sim_agents.openmm_agent", "OpenMMAgent"),
     "gromacs": ("skills.sim_agents.gromacs_agent", "GROMACSAgent"),
     "catmap": ("skills.sim_agents.catmap_agent", "CatMAPAgent"),
+    "llm_proxy": ("skills.llm_proxy_agent", "LLMProxyAgent"),
 }
 
 
@@ -98,6 +99,9 @@ async def launch_simulation_agents(manager, agent_names: list[str], device: str 
             # Configure agent based on type
             if name in ("mace", "chgnet"):
                 kwargs = {"device": device}
+            elif name == "llm_proxy":
+                # LLM proxy needs URL - skip here, launched separately
+                continue
             else:
                 kwargs = {}
 
@@ -189,6 +193,19 @@ async def run_agents(
             return
 
         logging.info(f"Launched {len(sim_agents)} simulation agents: {list(sim_agents.keys())}")
+
+        # Launch LLM Proxy Agent for monitoring
+        logging.info("Launching LLM Proxy Agent...")
+        from skills.llm_proxy_agent import LLMProxyAgent
+        llm_proxy = await manager.launch(
+            LLMProxyAgent,
+            kwargs={
+                "llm_url": llm_url,
+                "model": llm_model,
+            },
+        )
+        llm_status = await llm_proxy.get_status({})
+        logging.info(f"  LLM Proxy ready: {llm_status.get('model')}")
 
         # Shepherd config
         shepherd_config = {

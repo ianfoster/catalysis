@@ -101,21 +101,33 @@ def main():
     # Import agent classes
     try:
         from skills.shepherd import ShepherdAgent
+        from skills.llm_proxy_agent import LLMProxyAgent
         from skills.sim_agents.mace_agent import MACEAgent
         from skills.sim_agents.chgnet_agent import CHGNetAgent
         from skills.sim_agents.surrogate_agent import SurrogateAgent
         from skills.sim_agents.cantera_agent import CanteraAgent
         from skills.sim_agents.stability_agent import StabilityAgent
         from skills.sim_agents.qe_agent import QEAgent
+        from skills.sim_agents.openmm_agent import OpenMMAgent
+        from skills.sim_agents.m3gnet_agent import M3GNetAgent
+        from skills.sim_agents.gpaw_agent import GPAWAgent
+        from skills.sim_agents.gromacs_agent import GROMACSAgent
+        from skills.sim_agents.catmap_agent import CatMAPAgent
 
         agent_types = {
             "ShepherdAgent": ShepherdAgent,
+            "LLMProxyAgent": LLMProxyAgent,
             "MACEAgent": MACEAgent,
             "CHGNetAgent": CHGNetAgent,
             "SurrogateAgent": SurrogateAgent,
             "CanteraAgent": CanteraAgent,
             "StabilityAgent": StabilityAgent,
             "QEAgent": QEAgent,
+            "OpenMMAgent": OpenMMAgent,
+            "M3GNetAgent": M3GNetAgent,
+            "GPAWAgent": GPAWAgent,
+            "GROMACSAgent": GROMACSAgent,
+            "CatMAPAgent": CatMAPAgent,
         }
     except ImportError as e:
         st.error(f"Failed to import agent classes: {e}")

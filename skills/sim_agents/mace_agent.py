@@ -57,11 +57,11 @@ class MACEAgent(TrackedAgent):
             self._ready = True
             logger.info("MACE model loaded successfully")
         except ImportError as e:
-            logger.error(f"MACE not available: {e}")
-            raise
+            logger.warning(f"MACE not available: {e}")
+            self._ready = False
         except Exception as e:
-            logger.error(f"Failed to load MACE: {e}")
-            raise
+            logger.warning(f"Failed to load MACE: {e}")
+            self._ready = False
 
     @action
     async def screening(self, request: dict[str, Any]) -> dict[str, Any]:
