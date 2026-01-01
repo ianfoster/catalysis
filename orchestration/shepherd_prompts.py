@@ -45,8 +45,11 @@ REASONING_PROMPT = """\
 {candidate_json}
 ```
 
-## Available Tests
+## Available Tests (choose ONLY from tests marked [available] or [surrogate])
 {tests_table}
+
+## Tests Already Completed
+{completed_list}
 
 ## Results So Far
 {results_section}
@@ -64,9 +67,11 @@ Options:
 2. Stop and provide a final assessment (if confident enough or budget exhausted)
 
 IMPORTANT RULES:
-- DO NOT re-run tests that are marked [DONE] - they cannot be repeated
+- DO NOT re-run tests listed in "Tests Already Completed" - they CANNOT be repeated
+- ONLY choose tests marked [available] or [surrogate] in the table above
 - Each test can only be run ONCE per candidate
-- If all useful tests are done or budget is low, you MUST stop
+- If all affordable tests are [DONE], you MUST choose action "stop"
+- Do NOT invent test names - only use exact names from the Available Tests table
 
 Consider:
 - Have you run the minimum tests needed to assess this candidate?
@@ -185,12 +190,19 @@ def build_reasoning_prompt(
     Returns:
         Formatted prompt string
     """
-    completed_tests = {r["test"] for r in results}
+    completed_tests = {r["test"] for r in results if r.get("result", {}).get("ok", True)}
     budget_remaining = budget_total - budget_spent
+
+    # Build explicit list of completed tests
+    if completed_tests:
+        completed_list = ", ".join(sorted(completed_tests)) + " (DO NOT re-run these)"
+    else:
+        completed_list = "None yet"
 
     return REASONING_PROMPT.format(
         candidate_json=format_candidate(candidate),
         tests_table=format_tests_for_prompt(completed_tests, budget_remaining),
+        completed_list=completed_list,
         results_section=format_results(results),
         budget_total=budget_total,
         budget_spent=budget_spent,
