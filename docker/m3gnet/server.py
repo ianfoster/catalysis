@@ -20,8 +20,8 @@ def load_model():
     global _potential, _calculator_class
 
     import matgl
-    # M3GNet model requires DGL backend
-    matgl.set_backend("dgl")
+    # M3GNet model requires DGL backend (case-sensitive)
+    matgl.set_backend("DGL")
 
     from matgl.ext.ase import PESCalculator
 
