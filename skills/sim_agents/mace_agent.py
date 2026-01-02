@@ -84,10 +84,12 @@ class MACEAgent(TrackedAgent):
             slab = self._build_slab(candidate)
             slab.calc = self._calc
 
+            import asyncio
             import numpy as np
 
-            energy = float(slab.get_potential_energy())
-            forces = slab.get_forces()
+            # Run CPU-intensive ML calculations in thread pool to not block event loop
+            energy = await asyncio.to_thread(slab.get_potential_energy)
+            forces = await asyncio.to_thread(slab.get_forces)
 
             result = {
                 "ok": True,
@@ -122,6 +124,7 @@ class MACEAgent(TrackedAgent):
                 return result
 
             from ase.optimize import BFGS
+            import asyncio
             import numpy as np
 
             candidate = request.get("candidate", {})
@@ -131,13 +134,16 @@ class MACEAgent(TrackedAgent):
             slab = self._build_slab(candidate)
             slab.calc = self._calc
 
-            e_initial = float(slab.get_potential_energy())
+            # Run CPU-intensive relaxation in thread pool
+            def do_relaxation():
+                e_init = float(slab.get_potential_energy())
+                opt = BFGS(slab, logfile=None)
+                conv = opt.run(fmax=fmax, steps=max_steps)
+                e_fin = float(slab.get_potential_energy())
+                f = slab.get_forces()
+                return e_init, conv, e_fin, f, opt.nsteps
 
-            opt = BFGS(slab, logfile=None)
-            converged = opt.run(fmax=fmax, steps=max_steps)
-
-            e_final = float(slab.get_potential_energy())
-            forces = slab.get_forces()
+            e_initial, converged, e_final, forces, n_steps = await asyncio.to_thread(do_relaxation)
 
             result = {
                 "ok": True,
@@ -147,7 +153,7 @@ class MACEAgent(TrackedAgent):
                 "final_energy_eV": round(e_final, 6),
                 "energy_change_eV": round(e_final - e_initial, 6),
                 "max_force_eV_A": round(float(np.max(np.abs(forces))), 6),
-                "n_steps": opt.nsteps,
+                "n_steps": n_steps,
                 "n_atoms": len(slab),
             }
             tracker.set_result(result)

@@ -16,25 +16,54 @@ class M3GNetAgent(TrackedAgent):
 
     MatErials 3-body Graph Network for materials properties.
     Provides fast ML-based energy and force predictions.
-    Uses matgl (the maintained successor to m3gnet).
+
+    Supports three modes:
+    1. Local matgl (if dependencies work)
+    2. Local legacy m3gnet (TensorFlow-based)
+    3. Remote container via HTTP (recommended for dependency isolation)
 
     Inherits from TrackedAgent for automatic history tracking.
     """
 
-    def __init__(self, device: str = "cpu"):
-        """Initialize M3GNetAgent."""
+    def __init__(self, device: str = "cpu", container_url: str | None = None):
+        """Initialize M3GNetAgent.
+
+        Args:
+            device: Compute device for local mode
+            container_url: URL to M3GNet container (e.g., "http://localhost:8080")
+                          If provided, uses containerized M3GNet via HTTP.
+        """
         super().__init__(max_history=100)
         self._device = device
+        self._container_url = container_url
         self._m3gnet_available = False
         self._ase_available = False
         self._potential = None
         self._calculator_class = None
         self._use_matgl = False
+        self._use_container = False
 
     async def agent_on_startup(self) -> None:
-        """Check M3GNet/MatGL/ASE availability and load model."""
-        logger.info(f"M3GNetAgent starting: device={self._device}")
+        """Check M3GNet availability - container first, then local."""
+        logger.info(f"M3GNetAgent starting: device={self._device}, container_url={self._container_url}")
 
+        # Try container mode first (recommended)
+        if self._container_url:
+            try:
+                import aiohttp
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(f"{self._container_url}/health", timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            if data.get("ok"):
+                                self._use_container = True
+                                self._m3gnet_available = True
+                                logger.info(f"M3GNet container available at {self._container_url}")
+                                return
+            except Exception as e:
+                logger.warning(f"M3GNet container not available: {e}")
+
+        # Fall back to local mode
         try:
             import ase
             self._ase_available = True
@@ -48,7 +77,6 @@ class M3GNetAgent(TrackedAgent):
             import matgl
             logger.info(f"MatGL {matgl.__version__} found")
 
-            # matgl 2.x uses PESCalculator
             from matgl.ext.ase import PESCalculator
             logger.info("PESCalculator imported")
 
@@ -58,7 +86,7 @@ class M3GNetAgent(TrackedAgent):
             self._calculator_class = PESCalculator
             self._m3gnet_available = True
             self._use_matgl = True
-            logger.info("MatGL M3GNet ready")
+            logger.info("MatGL M3GNet ready (local)")
         except ImportError as e:
             logger.warning(f"MatGL import failed: {e}")
             # Fall back to old m3gnet
@@ -68,7 +96,7 @@ class M3GNetAgent(TrackedAgent):
                 self._calculator_class = M3GNetCalculator
                 self._m3gnet_available = True
                 self._use_matgl = False
-                logger.info("Legacy m3gnet model loaded")
+                logger.info("Legacy m3gnet model loaded (local)")
             except ImportError as e2:
                 logger.error(f"Neither matgl nor m3gnet available: matgl={e}, m3gnet={e2}")
             except Exception as e2:
@@ -76,13 +104,55 @@ class M3GNetAgent(TrackedAgent):
         except Exception as e:
             logger.error(f"Failed to load MatGL model: {e}")
 
+    async def _call_container(self, endpoint: str, candidate: dict[str, Any]) -> dict[str, Any]:
+        """Call M3GNet container via HTTP."""
+        import aiohttp
+
+        url = f"{self._container_url}/{endpoint}"
+        payload = {"candidate": candidate}
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=60),
+                ) as resp:
+                    if resp.status == 200:
+                        return await resp.json()
+                    else:
+                        error_text = await resp.text()
+                        return {
+                            "ok": False,
+                            "error": f"Container returned {resp.status}: {error_text}",
+                            "method": "m3gnet-container",
+                        }
+        except aiohttp.ClientError as e:
+            return {
+                "ok": False,
+                "error": f"Container request failed: {e}",
+                "method": "m3gnet-container",
+            }
+        except Exception as e:
+            return {
+                "ok": False,
+                "error": f"Container call error: {e}",
+                "method": "m3gnet-container",
+            }
+
     @action
     async def screening(self, request: dict[str, Any]) -> dict[str, Any]:
         """Run M3GNet energy calculation."""
         with self.track_action("screening", request) as tracker:
             candidate = request.get("candidate", {})
-            metals = candidate.get("metals", [])
 
+            # Use container mode if available
+            if self._use_container:
+                result = await self._call_container("screening", candidate)
+                tracker.set_result(result)
+                return result
+
+            metals = candidate.get("metals", [])
             cu = next((m["wt_pct"] for m in metals if m["element"] == "Cu"), 50)
             zn = next((m["wt_pct"] for m in metals if m["element"] == "Zn"), 30)
 
@@ -98,6 +168,7 @@ class M3GNetAgent(TrackedAgent):
             try:
                 from ase.build import fcc111
                 import numpy as np
+                import asyncio
 
                 # Build Cu/Zn slab
                 slab = fcc111("Cu", size=(2, 2, 3), vacuum=10.0)
@@ -117,8 +188,10 @@ class M3GNetAgent(TrackedAgent):
                     # Legacy m3gnet API
                     calc = self._calculator_class(potential=self._potential)
                 slab.calc = calc
-                energy = float(slab.get_potential_energy())
-                forces = slab.get_forces()
+
+                # Run CPU-intensive ML calculations in thread pool to not block event loop
+                energy = await asyncio.to_thread(slab.get_potential_energy)
+                forces = await asyncio.to_thread(slab.get_forces)
                 max_force = float(np.max(np.abs(forces)))
 
                 result = {
@@ -143,11 +216,14 @@ class M3GNetAgent(TrackedAgent):
     async def get_status(self, request: dict[str, Any]) -> dict[str, Any]:
         """Get agent status including history statistics."""
         stats = self._get_statistics()
+        ready = self._m3gnet_available and (self._ase_available or self._use_container)
         return {
             "ok": True,
-            "ready": self._m3gnet_available and self._ase_available,
+            "ready": ready,
             "m3gnet_available": self._m3gnet_available,
             "ase_available": self._ase_available,
+            "use_container": self._use_container,
+            "container_url": self._container_url,
             "device": self._device,
             "total_actions": stats["total_actions"],
             "total_time_s": stats["total_time_s"],

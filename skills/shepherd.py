@@ -73,6 +73,7 @@ class ShepherdAgent(TrackedAgent):
         llm_model: str | None = None,
         redis_host: str | None = None,
         redis_port: int = 6379,
+        shepherd_id: int | str | None = None,
     ):
         """Initialize ShepherdAgent.
 
@@ -99,12 +100,22 @@ class ShepherdAgent(TrackedAgent):
                 Defaults to "meta-llama/Meta-Llama-3-8B-Instruct".
             redis_host: Redis hostname for distributed narrative logging.
             redis_port: Redis port (default 6379).
+            shepherd_id: Optional ID for this shepherd (for logging).
+                Auto-generated if not provided.
         """
         super().__init__(max_history=100)
         self._config = config
         self._gc_function_map = gc_function_map or {}
         self._redis_host = redis_host
         self._redis_port = redis_port
+
+        # Shepherd identification for logging
+        if shepherd_id is not None:
+            self._shepherd_id = str(shepherd_id)
+        else:
+            import random
+            self._shepherd_id = f"S{random.randint(1, 999):03d}"
+        self._current_candidate: str | None = None  # For logging context
 
         # Academy agent mode
         self._llm_agent = llm_agent
@@ -252,13 +263,17 @@ class ShepherdAgent(TrackedAgent):
         budget_total = req.get("budget", budget_config.get("default", 100.0))
         goal = req.get("goal", "CO2-to-methanol conversion")
 
+        # Set current candidate for logging context
+        self._current_candidate = _candidate_summary(candidate)
+
         # Track this evaluation
         action_tracker = self.track_action("evaluate", req)
         action_tracker.__enter__()
 
         logger.info(
-            "ShepherdAgent evaluating candidate: %s (budget=%.2f)",
-            _candidate_summary(candidate),
+            "[%s|%s] Starting evaluation (budget=%.1f)",
+            self._shepherd_id,
+            self._current_candidate,
             budget_total,
         )
 
@@ -275,9 +290,10 @@ class ShepherdAgent(TrackedAgent):
         affordable_fast = [t for t in fast_tests if t.cost <= budget_total]
 
         logger.info(
-            "Phase 1: Running %d fast tests in parallel (runtime < %.0fs)",
+            "[%s|%s] Phase 1: Running %d fast tests in parallel",
+            self._shepherd_id,
+            self._current_candidate,
             len(affordable_fast),
-            FAST_TEST_THRESHOLD_S,
         )
         narrative._write(f"   Phase 1: Running {len(affordable_fast)} fast tests in parallel...")
 
@@ -325,7 +341,8 @@ class ShepherdAgent(TrackedAgent):
                 budget_spent += r["cost"]
 
                 # Record runtime for adaptive classification
-                if r.get("elapsed"):
+                # Note: use "in" check since elapsed=0.0 is falsy but valid
+                if "elapsed" in r:
                     self._runtime_tracker.record(r["test"], r["elapsed"])
 
                 # Log to narrative
@@ -338,7 +355,9 @@ class ShepherdAgent(TrackedAgent):
             })
 
             logger.info(
-                "Phase 1 complete: %d tests, budget spent %.2f",
+                "[%s|%s] Phase 1 complete: %d tests, cost=%.2f",
+                self._shepherd_id,
+                self._current_candidate,
                 len(fast_results),
                 budget_spent,
             )
@@ -352,9 +371,10 @@ class ShepherdAgent(TrackedAgent):
 
         if affordable_slow and budget_spent < budget_total:
             logger.info(
-                "Phase 2: Consulting LLM about %d slow tests (runtime >= %.0fs)",
+                "[%s|%s] Phase 2: Consulting LLM about %d slow tests",
+                self._shepherd_id,
+                self._current_candidate,
                 len(affordable_slow),
-                FAST_TEST_THRESHOLD_S,
             )
             narrative._write(f"   Phase 2: Consulting LLM about {len(affordable_slow)} slow tests...")
 
@@ -401,9 +421,10 @@ class ShepherdAgent(TrackedAgent):
 
                 if action_type == "stop":
                     logger.info(
-                        "LLM decided to stop: confidence=%.2f reason=%s",
+                        "[%s|%s] LLM stopped: confidence=%.2f",
+                        self._shepherd_id,
+                        self._current_candidate,
                         decision.get("confidence", 0),
-                        decision.get("reasoning", "")[:100],
                     )
                     break
 
@@ -449,7 +470,13 @@ class ShepherdAgent(TrackedAgent):
                         continue
 
                     # Run the expensive test
-                    logger.info("Running expensive test: %s (cost=%.2f)", test_name, test_spec.cost)
+                    logger.info(
+                        "[%s|%s] Running: %s (cost=%.2f)",
+                        self._shepherd_id,
+                        self._current_candidate,
+                        test_name,
+                        test_spec.cost,
+                    )
                     reasoning = decision.get("reasoning", "")
                     narrative.shepherd_decision(test_name, reasoning, test_spec.cost)
                     narrative.shepherd_running_test(test_name, None)
@@ -515,6 +542,21 @@ class ShepherdAgent(TrackedAgent):
             "history": history,
             "phases": 2,
         }
+
+        # Log completion with score
+        score = final_assessment.get("viability_score", 0)
+        rec = final_assessment.get("recommendation", "?")
+        logger.info(
+            "[%s|%s] Done: score=%d rec=%s cost=%.1f",
+            self._shepherd_id,
+            self._current_candidate,
+            score,
+            rec,
+            budget_spent,
+        )
+
+        # Clear current candidate
+        self._current_candidate = None
 
         # Complete action tracking
         action_tracker.set_result(result)

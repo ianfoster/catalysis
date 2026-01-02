@@ -227,7 +227,8 @@ async def run_agents(
         # Launch ShepherdAgents
         shepherds = []
         for i in range(num_shepherds):
-            logging.info(f"Launching ShepherdAgent {i+1}/{num_shepherds}...")
+            shepherd_id = f"S{i+1}"
+            logging.info(f"Launching ShepherdAgent {shepherd_id} ({i+1}/{num_shepherds})...")
             shepherd = await manager.launch(
                 ShepherdAgent,
                 kwargs={
@@ -238,6 +239,7 @@ async def run_agents(
                     "llm_model": llm_model,
                     "redis_host": redis_host,
                     "redis_port": redis_port,
+                    "shepherd_id": shepherd_id,
                 },
             )
             shepherds.append(shepherd)

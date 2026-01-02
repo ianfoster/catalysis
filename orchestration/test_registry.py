@@ -43,7 +43,8 @@ class TestSpec:
     expected_runtime_s: int = 60
     gc_function: str = ""  # Globus Compute function name
     simulation_method: str = ""  # Underlying simulation code
-    method_status: str = "available"  # 'available', 'surrogate', 'unavailable'
+    method_status: str = "available"  # 'available', 'surrogate', 'unavailable', 'disabled'
+    display_name: str = ""  # Short name for logs/UI (defaults to name if empty)
 
 
 # Default test registry
@@ -57,6 +58,7 @@ class TestSpec:
 AVAILABLE_TESTS: dict[str, TestSpec] = {
     "fast_surrogate": TestSpec(
         name="fast_surrogate",
+        display_name="Yield Estimate",
         description=(
             "Quick surrogate prediction (~1s). SURROGATE - uses simple formulas. "
             "Returns CO2 conversion, methanol selectivity, and space-time yield (STY). "
@@ -75,6 +77,7 @@ AVAILABLE_TESTS: dict[str, TestSpec] = {
     ),
     "ml_screening": TestSpec(
         name="ml_screening",
+        display_name="MACE Energy",
         description=(
             "ML potential screening with MACE (~10s). "
             "Returns total energy, energy per atom, and maximum force. "
@@ -93,6 +96,7 @@ AVAILABLE_TESTS: dict[str, TestSpec] = {
     ),
     "chgnet_screening": TestSpec(
         name="chgnet_screening",
+        display_name="CHGNet Energy",
         description=(
             "ML potential screening with CHGNet (~10s). "
             "Alternative to MACE, good for oxides. "
@@ -111,6 +115,7 @@ AVAILABLE_TESTS: dict[str, TestSpec] = {
     ),
     "ml_relaxation": TestSpec(
         name="ml_relaxation",
+        display_name="MACE Relax",
         description=(
             "ML potential structure relaxation with MACE (~60s). REAL PHYSICS. "
             "Relaxes atomic positions to minimize energy. "
@@ -126,6 +131,25 @@ AVAILABLE_TESTS: dict[str, TestSpec] = {
         gc_function="ml_relaxation",
         simulation_method="mace",
         method_status="available",
+    ),
+    "m3gnet_screening": TestSpec(
+        name="m3gnet_screening",
+        display_name="M3GNet Energy",
+        description=(
+            "ML potential screening with M3GNet (~10s). "
+            "Third ML potential for cross-validation with MACE/CHGNet. "
+            "Currently DISABLED - run scripts/fix_m3gnet.py on Spark to enable."
+        ),
+        cost=0.5,
+        endpoint="cheap",
+        prerequisites=(),
+        timeout=120,
+        outputs=("total_energy_eV", "energy_per_atom_eV", "max_force_eV_A"),
+        reduces_uncertainty=True,
+        expected_runtime_s=10,
+        gc_function="ml_m3gnet",
+        simulation_method="m3gnet",
+        method_status="disabled",  # Enable after running fix_m3gnet.py
     ),
     "microkinetic_lite": TestSpec(
         name="microkinetic_lite",
@@ -180,6 +204,7 @@ AVAILABLE_TESTS: dict[str, TestSpec] = {
     ),
     "stability_analysis": TestSpec(
         name="stability_analysis",
+        display_name="Thermo Stability",
         description=(
             "Thermodynamic stability analysis (~30s). SURROGATE - heuristic model. "
             "Estimates catalyst stability under reaction conditions. "
@@ -198,6 +223,7 @@ AVAILABLE_TESTS: dict[str, TestSpec] = {
     ),
     "cantera_reactor": TestSpec(
         name="cantera_reactor",
+        display_name="Reactor Kinetics",
         description=(
             "Cantera reactor simulation (~30s). REAL PHYSICS - Langmuir-Hinshelwood kinetics. "
             "Returns conversion, selectivity, yield using literature rate constants. "
@@ -247,6 +273,22 @@ def get_test(name: str) -> TestSpec:
     if name not in AVAILABLE_TESTS:
         raise KeyError(f"Unknown test: {name}. Available: {list(AVAILABLE_TESTS.keys())}")
     return AVAILABLE_TESTS[name]
+
+
+def get_display_name(name: str) -> str:
+    """Get human-readable display name for a test.
+
+    Args:
+        name: Test name
+
+    Returns:
+        Display name (or test name if no display_name set)
+    """
+    try:
+        spec = get_test(name)
+        return spec.display_name if spec.display_name else spec.name
+    except KeyError:
+        return name
 
 
 def check_prerequisites(test_name: str, completed_tests: set[str]) -> tuple[bool, list[str]]:

@@ -25,6 +25,7 @@ class CHGNetAgent(TrackedAgent):
         super().__init__(max_history=100)
         self._device = device
         self._model = None
+        self._calculator_class = None
         self._ready = False
 
     async def agent_on_startup(self) -> None:
@@ -33,12 +34,16 @@ class CHGNetAgent(TrackedAgent):
 
         try:
             from chgnet.model import CHGNet
+            # Also test CHGNetCalculator import - it uses ExpCellFilter which moved in newer ASE
+            from chgnet.model.dynamics import CHGNetCalculator
 
             self._model = CHGNet.load()
+            self._calculator_class = CHGNetCalculator
             self._ready = True
             logger.info("CHGNet model loaded successfully")
         except ImportError as e:
             # CHGNet has ASE compatibility issues with newer versions
+            # ExpCellFilter moved from ase.constraints to ase.filters
             logger.warning(f"CHGNet not available (ASE compatibility issue): {e}")
             self._ready = False
         except Exception as e:
@@ -50,21 +55,22 @@ class CHGNetAgent(TrackedAgent):
         """Run CHGNet single-point energy calculation."""
         with self.track_action("screening", request) as tracker:
             if not self._ready:
-                result = {"ok": False, "error": "CHGNet not ready"}
+                result = {"ok": False, "error": "CHGNet not ready (ASE compatibility issue)"}
                 tracker.set_result(result)
                 return result
 
-            from chgnet.model.dynamics import CHGNetCalculator
+            import asyncio
             import numpy as np
 
             candidate = request.get("candidate", {})
             slab = self._build_slab(candidate)
 
-            calc = CHGNetCalculator(model=self._model, use_device=self._device)
+            calc = self._calculator_class(model=self._model, use_device=self._device)
             slab.calc = calc
 
-            energy = float(slab.get_potential_energy())
-            forces = slab.get_forces()
+            # Run CPU-intensive ML calculations in thread pool to not block event loop
+            energy = await asyncio.to_thread(slab.get_potential_energy)
+            forces = await asyncio.to_thread(slab.get_forces)
 
             result = {
                 "ok": True,
