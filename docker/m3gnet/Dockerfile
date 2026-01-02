@@ -9,15 +9,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     && rm -rf /var/lib/apt/lists/*
 
-# Install dependencies with compatible versions
-# matgl 1.1.3 requires dgl>=2.0.0 and newer ASE with ase.filters
+# Install matgl and let it pull compatible dependencies
+# Then add flask for HTTP server
 RUN pip install --no-cache-dir \
     torch==2.1.0 \
-    dgl==2.0.0 \
-    matgl==1.1.3 \
-    ase>=3.23.0 \
-    pymatgen==2024.2.8 \
-    numpy \
+    matgl \
     flask
 
 # Copy the server script
