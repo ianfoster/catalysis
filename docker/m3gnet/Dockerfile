@@ -3,6 +3,12 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
+# Install build tools for pymatgen compilation
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install dependencies with compatible versions
 # matgl 1.1.3 requires dgl>=2.0.0
 RUN pip install --no-cache-dir \
