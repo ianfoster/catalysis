@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Simple M3GNet HTTP server for containerized deployment."""
+"""Simple M3GNet HTTP server for containerized deployment. """
+
+import os
+# Disable oneDNN/MKL optimizations for ARM compatibility
+os.environ["DNNL_DEFAULT_FPMATH_MODE"] = "F32"
+os.environ["ONEDNN_PRIMITIVE_CACHE_CAPACITY"] = "0"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "1"
 
 import json
 import logging
