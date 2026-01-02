@@ -9,10 +9,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     && rm -rf /var/lib/apt/lists/*
 
-# Install matgl and let it pull compatible dependencies
-# Then add flask for HTTP server
+# Install matgl with DGL backend
+# DGL is required but not auto-installed by matgl
 RUN pip install --no-cache-dir \
     torch==2.1.0 \
+    dgl \
     matgl \
     flask
 
