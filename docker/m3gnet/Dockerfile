@@ -14,10 +14,11 @@ RUN pip install --no-cache-dir "numpy<2"
 RUN pip install --no-cache-dir torch==2.0.0
 
 # Install matgl with DGL backend
+# DGL 1.1.3 is compatible with torch 2.0
 # torchdata<0.8 needed for datapipes compatibility
 RUN pip install --no-cache-dir \
     "torchdata<0.8" \
-    dgl \
+    dgl==1.1.3 \
     matgl \
     flask
 
