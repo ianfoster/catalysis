@@ -20,6 +20,10 @@ def load_model():
     global _potential, _calculator_class
 
     import matgl
+    # M3GNet model requires DGL backend
+    matgl.clear_cache()  # Clear any stale cached models
+    matgl.set_backend("dgl")
+
     from matgl.ext.ase import PESCalculator
 
     logger.info("Loading M3GNet model...")
