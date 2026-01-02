@@ -9,13 +9,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     && rm -rf /var/lib/apt/lists/*
 
+# Install numpy first, then torch CPU-only for ARM
+RUN pip install --no-cache-dir "numpy<2"
+RUN pip install --no-cache-dir torch==2.1.0 --index-url https://download.pytorch.org/whl/cpu
+
 # Install matgl with DGL backend
-# DGL is required but not auto-installed by matgl
 # torchdata<0.8 needed for datapipes compatibility
-# numpy<2 for torch 2.1 compatibility
 RUN pip install --no-cache-dir \
-    "numpy<2" \
-    torch==2.1.0 \
     "torchdata<0.8" \
     dgl \
     matgl \
@@ -23,6 +23,11 @@ RUN pip install --no-cache-dir \
 
 # Copy the server script
 COPY server.py /app/
+
+# Disable oneDNN for ARM compatibility
+ENV DNNL_VERBOSE=0
+ENV TF_ENABLE_ONEDNN_OPTS=0
+ENV TORCH_USE_RTLD_GLOBAL=1
 
 EXPOSE 8080
 
