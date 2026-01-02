@@ -9,9 +9,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     && rm -rf /var/lib/apt/lists/*
 
-# Install numpy first, then torch CPU-only for ARM
+# Install numpy first, then torch 2.0 for better ARM support
 RUN pip install --no-cache-dir "numpy<2"
-RUN pip install --no-cache-dir torch==2.1.0 --index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir torch==2.0.0
 
 # Install matgl with DGL backend
 # torchdata<0.8 needed for datapipes compatibility
