@@ -99,6 +99,9 @@ async def launch_simulation_agents(manager, agent_names: list[str], device: str 
             # Configure agent based on type
             if name in ("mace", "chgnet"):
                 kwargs = {"device": device}
+            elif name == "m3gnet":
+                # M3GNet uses container for dependency isolation
+                kwargs = {"device": device, "container_url": "http://localhost:8080"}
             elif name == "llm_proxy":
                 # LLM proxy needs URL - skip here, launched separately
                 continue

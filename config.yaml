@@ -62,17 +62,17 @@ generator:
     api_key_env: "OPENAI_API_KEY"
 
   generation:
-    candidates_per_iteration: 15
-    max_iterations: 20
+    candidates_per_iteration: 25
+    max_iterations: 100
 
   convergence:
-    patience: 6              # Stop if no improvement for N iterations
-    min_improvement: 0.01    # Minimum score improvement to count
+    patience: 15             # Stop if no improvement for N iterations
+    min_improvement: 0.005   # Minimum score improvement to count
     llm_judgment: true       # Also ask LLM about convergence
 
   shepherd:
-    budget_per_candidate: 100.0
-    max_concurrent_shepherds: 10
+    budget_per_candidate: 150.0
+    max_concurrent_shepherds: 8
     timeout: 3600
 
   state:
@@ -128,6 +128,6 @@ academy:
 
   # ShepherdAgent spawning
   shepherds:
-    num_concurrent: 4  # Number of ShepherdAgents to run in parallel
-    budget_per_candidate: 100.0
+    num_concurrent: 8  # Number of ShepherdAgents to run in parallel
+    budget_per_candidate: 150.0
     timeout: 3600

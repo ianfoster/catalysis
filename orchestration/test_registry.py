@@ -149,7 +149,7 @@ AVAILABLE_TESTS: dict[str, TestSpec] = {
         expected_runtime_s=10,
         gc_function="ml_m3gnet",
         simulation_method="m3gnet",
-        method_status="disabled",  # Enable after running fix_m3gnet.py
+        method_status="available",  # Container running on localhost:8080
     ),
     "microkinetic_lite": TestSpec(
         name="microkinetic_lite",
