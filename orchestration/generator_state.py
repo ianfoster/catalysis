@@ -310,7 +310,7 @@ def validate_candidate(
     """
     # Check support
     support = candidate.get("support", "")
-    valid_supports = ["Al2O3", "ZrO2", "SiO2"]
+    valid_supports = ["Al2O3", "ZrO2", "SiO2", "TiO2", "CeO2", "MgO", "ZnO"]
     if support not in valid_supports:
         return False, f"Invalid support '{support}'. Must be one of {valid_supports}"
 
@@ -319,7 +319,7 @@ def validate_candidate(
     if not metals:
         return False, "No metals specified"
 
-    valid_elements = ["Cu", "Zn", "Al"]
+    valid_elements = ["Cu", "Zn", "Al", "Pd", "Pt", "Ni", "Fe", "Co"]
     total_wt = 0.0
     seen_elements = set()
 

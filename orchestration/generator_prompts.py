@@ -34,8 +34,8 @@ Propose {n_candidates} new catalyst candidates for CO2-to-methanol conversion.
 {patterns_summary}
 
 ## Constraints
-- Metals: Cu, Zn, Al (weight percentages must sum to 100%)
-- Supports: Al2O3, ZrO2, SiO2
+- Metals: Cu, Zn, Al, Pd, Pt, Ni, Fe, Co (weight percentages must sum to 100%)
+- Supports: Al2O3, ZrO2, SiO2, TiO2, CeO2, MgO, ZnO
 - Each metal wt_pct must be between 0 and 100
 - Avoid duplicates of previously evaluated candidates
 

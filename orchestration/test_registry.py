@@ -130,56 +130,53 @@ AVAILABLE_TESTS: dict[str, TestSpec] = {
     "microkinetic_lite": TestSpec(
         name="microkinetic_lite",
         description=(
-            "Lite microkinetic analysis (~60s). SURROGATE - uses simple formulas. "
-            "Returns rate-limiting step (RLS), temperature sensitivity, pressure sensitivity. "
-            "Medium cost. Reduces prediction uncertainty."
+            "DISABLED - Lite microkinetic analysis. Was using simple formulas, not real CatMAP. "
+            "Use cantera_reactor instead for real kinetics."
         ),
         cost=1.0,
         endpoint="cheap",
-        prerequisites=(),  # Removed temporarily
+        prerequisites=(),
         timeout=120,
         outputs=("RLS", "temp_sensitivity", "pressure_sensitivity", "uncertainty_reduction"),
-        reduces_uncertainty=True,
+        reduces_uncertainty=False,
         expected_runtime_s=60,
         gc_function="microkinetic_lite",
         simulation_method="catmap",
-        method_status="surrogate",
+        method_status="disabled",
     ),
     "dft_adsorption": TestSpec(
         name="dft_adsorption",
         description=(
-            "DFT adsorption energy calculation. SURROGATE - QE not configured. "
-            "Returns estimated CO2 and H adsorption energies. "
-            "High cost. Would reduce uncertainty if real DFT."
+            "DISABLED - DFT adsorption energy. QE not configured, was returning fake data. "
+            "Re-enable when real Quantum ESPRESSO is set up."
         ),
-        cost=10.0,  # Reduced from 100 for testing
+        cost=10.0,
         endpoint="gpu",
-        prerequisites=(),  # Removed temporarily
+        prerequisites=(),
         timeout=7200,
         outputs=("E_ads_CO2", "E_ads_H", "uncertainty_reduction"),
-        reduces_uncertainty=True,
+        reduces_uncertainty=False,
         expected_runtime_s=3600,
         gc_function="dft_qe",
         simulation_method="quantum_espresso",
-        method_status="surrogate",
+        method_status="disabled",
     ),
     "openmm_relaxation": TestSpec(
         name="openmm_relaxation",
         description=(
-            "OpenMM structure relaxation (~5min). SURROGATE - no force field for catalysts. "
-            "Returns approximate relaxed energy and structure RMSD. "
-            "Medium cost."
+            "DISABLED - OpenMM structure relaxation. No force field for inorganic catalysts. "
+            "OpenMM is for biomolecules. Use ml_relaxation (MACE) instead."
         ),
         cost=5.0,
         endpoint="gpu",
-        prerequisites=(),  # Removed temporarily
+        prerequisites=(),
         timeout=600,
         outputs=("relaxed_energy", "structure_rmsd"),
-        reduces_uncertainty=True,
+        reduces_uncertainty=False,
         expected_runtime_s=300,
         gc_function="openmm_relaxation",
         simulation_method="openmm",
-        method_status="surrogate",
+        method_status="disabled",
     ),
     "stability_analysis": TestSpec(
         name="stability_analysis",
@@ -202,8 +199,9 @@ AVAILABLE_TESTS: dict[str, TestSpec] = {
     "cantera_reactor": TestSpec(
         name="cantera_reactor",
         description=(
-            "Cantera reactor simulation (~30s). SURROGATE - no methanol mechanism. "
-            "Returns approximate conversion, selectivity, and yield. "
+            "Cantera reactor simulation (~30s). REAL PHYSICS - Langmuir-Hinshelwood kinetics. "
+            "Returns conversion, selectivity, yield using literature rate constants. "
+            "Uses real thermodynamic equilibrium from Cantera."
         ),
         cost=1.0,
         endpoint="cheap",
@@ -214,7 +212,7 @@ AVAILABLE_TESTS: dict[str, TestSpec] = {
         expected_runtime_s=30,
         gc_function="cantera_reactor",
         simulation_method="cantera",
-        method_status="surrogate",
+        method_status="available",
     ),
 }
 
@@ -223,13 +221,15 @@ CHEAP_TEST_THRESHOLD = 2.0
 
 
 def get_cheap_tests() -> list[TestSpec]:
-    """Get all tests below the cheap threshold."""
-    return [t for t in AVAILABLE_TESTS.values() if t.cost < CHEAP_TEST_THRESHOLD]
+    """Get all enabled tests below the cheap threshold."""
+    return [t for t in AVAILABLE_TESTS.values()
+            if t.cost < CHEAP_TEST_THRESHOLD and t.method_status != "disabled"]
 
 
 def get_expensive_tests() -> list[TestSpec]:
-    """Get all tests at or above the cheap threshold."""
-    return [t for t in AVAILABLE_TESTS.values() if t.cost >= CHEAP_TEST_THRESHOLD]
+    """Get all enabled tests at or above the cheap threshold."""
+    return [t for t in AVAILABLE_TESTS.values()
+            if t.cost >= CHEAP_TEST_THRESHOLD and t.method_status != "disabled"]
 
 
 def get_test(name: str) -> TestSpec:
@@ -286,7 +286,9 @@ def format_tests_for_prompt(
 
     for name, spec in AVAILABLE_TESTS.items():
         # Status indicator
-        if name in completed_tests:
+        if spec.method_status == "disabled":
+            continue  # Skip disabled tests entirely
+        elif name in completed_tests:
             avail = "[DONE]"
         elif spec.method_status == "unavailable":
             avail = "[BROKEN]"
@@ -327,6 +329,8 @@ def get_affordable_tests(
     affordable = []
 
     for name, spec in AVAILABLE_TESTS.items():
+        if spec.method_status == "disabled":
+            continue  # Skip disabled tests
         if name in completed_tests:
             continue
         if spec.cost > budget_remaining:
@@ -496,10 +500,12 @@ class RuntimeTracker:
             threshold_s: Runtime threshold in seconds (default 30s)
 
         Returns:
-            List of TestSpecs for fast tests
+            List of TestSpecs for fast tests (excludes disabled tests)
         """
         fast = []
         for name, spec in AVAILABLE_TESTS.items():
+            if spec.method_status == "disabled":
+                continue  # Skip disabled tests
             runtime = self.get_estimated_runtime(name)
             if runtime < threshold_s:
                 fast.append(spec)
@@ -512,10 +518,12 @@ class RuntimeTracker:
             threshold_s: Runtime threshold in seconds (default 30s)
 
         Returns:
-            List of TestSpecs for slow tests
+            List of TestSpecs for slow tests (excludes disabled tests)
         """
         slow = []
         for name, spec in AVAILABLE_TESTS.items():
+            if spec.method_status == "disabled":
+                continue  # Skip disabled tests
             runtime = self.get_estimated_runtime(name)
             if runtime >= threshold_s:
                 slow.append(spec)
