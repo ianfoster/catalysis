@@ -10,12 +10,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install dependencies with compatible versions
-# matgl 1.1.3 requires dgl>=2.0.0
+# matgl 1.1.3 requires dgl>=2.0.0 and newer ASE with ase.filters
 RUN pip install --no-cache-dir \
     torch==2.1.0 \
     dgl==2.0.0 \
     matgl==1.1.3 \
-    ase==3.22.1 \
+    ase>=3.23.0 \
     pymatgen==2024.2.8 \
     numpy \
     flask
