@@ -1,0 +1,7 @@
+#include "spc216.itp"
+
+[ system ]
+Test water system
+
+[ molecules ]
+SOL     3

@@ -1,0 +1,33 @@
+; md.mdp — minimal test MD
+integrator      = md
+nsteps          = 500        ; 500 steps
+dt              = 0.002      ; 2 fs
+
+nstxout         = 100
+nstvout         = 100
+nstenergy       = 100
+nstlog          = 100
+
+continuation    = no
+constraint_algorithm = lincs
+constraints     = all-bonds
+
+tcoupl          = v-rescale
+tc-grps         = System
+tau_t           = 0.1
+ref_t           = 300
+
+pcoupl          = no
+
+cutoff-scheme   = Verlet
+nstlist         = 10
+rlist           = 0.4
+rcoulomb        = 0.4
+rvdw            = 0.4
+
+coulombtype     = Cut-off
+vdwtype         = Cut-off
+
+gen_vel         = yes
+gen_temp        = 300
+gen_seed        = 42

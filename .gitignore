@@ -5,3 +5,22 @@ __pycache__/
 .vscode/
 .idea/
 .DS_Store
+data/char_cache.jsonl
+config.local.yaml
+data/seen_candidates.jsonl
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Local config / IDs
+UUIDs
+*.env
+config.local.yaml
+
+# Run artifacts
+data/
+runs/
+*.jsonl
+

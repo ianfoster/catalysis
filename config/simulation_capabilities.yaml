@@ -1,0 +1,187 @@
+# Simulation Capabilities Registry
+# This file documents which simulation codes are available on each endpoint
+# and helps LLM agents select appropriate methods.
+#
+# Last updated: 2024-12-30
+# Endpoint: Spark (cee14c1d-100c-417b-9049-8c8914f3ff56)
+
+endpoint:
+  name: "Spark"
+  id: "cee14c1d-100c-417b-9049-8c8914f3ff56"
+  updated: "2024-12-30"
+
+# =============================================================================
+# ML POTENTIALS - Fast screening, ~seconds per structure
+# =============================================================================
+ml_potentials:
+  mace:
+    status: "available"
+    speed: "fast"
+    accuracy: "high"
+    use_case: "Primary ML screening - best accuracy/speed tradeoff"
+    gc_function: "ml_screening"
+    notes: "Use dispersion=False, default_dtype=float32, device=cpu"
+
+  chgnet:
+    status: "available"
+    speed: "fast"
+    accuracy: "medium-high"
+    use_case: "Secondary ML screening, good for oxides"
+    gc_function: "ml_screening"
+    notes: "Use use_device=cpu"
+
+  m3gnet:
+    status: "unavailable"
+    reason: "ASE version incompatibility (ExpCellFilter moved to ase.filters)"
+    workaround: "Use MACE or CHGNet instead"
+    gc_function: "ml_m3gnet"
+
+# =============================================================================
+# DFT - High accuracy, ~hours per structure
+# =============================================================================
+dft:
+  quantum_espresso:
+    status: "available"
+    speed: "slow"
+    accuracy: "high"
+    use_case: "Production DFT calculations, adsorption energies"
+    gc_function: "dft_qe"
+    notes: "Requires pseudopotentials in standard locations"
+
+  gpaw:
+    status: "unavailable"
+    reason: "MPI not configured (needs mpi4py)"
+    workaround: "Use Quantum ESPRESSO"
+    gc_function: "dft_gpaw"
+
+  vasp:
+    status: "unavailable"
+    reason: "Commercial license required"
+    workaround: "Use Quantum ESPRESSO"
+
+# =============================================================================
+# MOLECULAR DYNAMICS - Structure relaxation, dynamics
+# =============================================================================
+md:
+  openmm:
+    status: "available"
+    speed: "medium"
+    use_case: "Biomolecular simulations, structure relaxation"
+    gc_function: "openmm_relaxation"
+    notes: "Requires structure files (PDB/topology)"
+
+  gromacs:
+    status: "available"
+    speed: "medium"
+    use_case: "Classical MD, free energy calculations"
+    gc_function: "gromacs_md"
+    notes: "Requires topology and parameter files"
+
+# =============================================================================
+# KINETICS - Reactor modeling, microkinetics
+# =============================================================================
+kinetics:
+  cantera:
+    status: "surrogate_only"
+    speed: "fast"
+    use_case: "Reactor modeling, experiment simulation"
+    gc_function: "cantera_reactor"
+    notes: "Full Cantera available but no methanol mechanism file yet"
+
+  catmap:
+    status: "surrogate_only"
+    speed: "fast"
+    use_case: "Microkinetic modeling from DFT energies"
+    gc_function: "microkinetic_catmap"
+    notes: "Full CatMAP requires energy input files"
+
+# =============================================================================
+# RECOMMENDED WORKFLOWS
+# =============================================================================
+workflows:
+  fast_screening:
+    description: "Quick candidate filtering"
+    steps:
+      - method: "mace"
+        purpose: "Calculate formation energy and forces"
+    time_estimate: "seconds per candidate"
+
+  standard_evaluation:
+    description: "Full candidate evaluation"
+    steps:
+      - method: "mace"
+        purpose: "Initial screening and structure relaxation"
+      - method: "quantum_espresso"
+        purpose: "DFT validation of top candidates"
+      - method: "cantera"
+        purpose: "Reactor performance prediction"
+    time_estimate: "hours per candidate"
+
+  ml_comparison:
+    description: "Compare ML potential predictions"
+    steps:
+      - method: "mace"
+        purpose: "Primary prediction"
+      - method: "chgnet"
+        purpose: "Cross-validation"
+    time_estimate: "seconds per candidate"
+
+# =============================================================================
+# SELECTION GUIDANCE FOR LLM AGENTS
+# =============================================================================
+selection_rules:
+  - rule: "For initial screening, always use MACE (fastest, most accurate ML potential)"
+  - rule: "For DFT validation, use Quantum ESPRESSO (only available DFT code)"
+  - rule: "For structure relaxation, prefer MACE over OpenMM for inorganic systems"
+  - rule: "For kinetics, use surrogate models (real codes need mechanism files)"
+  - rule: "Never request M3GNet or GPAW (currently broken)"
+  - rule: "If a code returns ok=False, do not retry - report the error"
+
+# =============================================================================
+# GC FUNCTION QUICK REFERENCE
+# =============================================================================
+gc_functions:
+  # Working functions
+  ml_screening:
+    status: "working"
+    codes: ["MACE", "CHGNet"]
+    returns: ["total_energy_eV", "energy_per_atom_eV", "max_force_eV_A"]
+
+  ml_relaxation:
+    status: "working"
+    codes: ["MACE", "CHGNet"]
+    returns: ["final_energy_eV", "converged", "n_steps"]
+
+  dft_qe:
+    status: "working"
+    codes: ["Quantum ESPRESSO"]
+    returns: ["total_energy_eV"]
+
+  cantera_reactor:
+    status: "surrogate"
+    returns: ["conversion", "selectivity", "products"]
+
+  cantera_sensitivity:
+    status: "surrogate"
+    returns: ["sensitivities", "optimal_conditions"]
+
+  microkinetic_catmap:
+    status: "surrogate"
+    returns: ["RLS", "temp_sensitivity", "pressure_sensitivity"]
+
+  fast_surrogate:
+    status: "working"
+    returns: ["co2_conversion", "methanol_selectivity", "methanol_sty"]
+
+  stability_analysis:
+    status: "working"
+    returns: ["stability_score", "degradation_risk"]
+
+  # Broken functions - do not use
+  ml_m3gnet:
+    status: "broken"
+    reason: "ASE version incompatibility"
+
+  dft_gpaw:
+    status: "broken"
+    reason: "MPI not configured"

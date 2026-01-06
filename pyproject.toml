@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "catalysis"
+version = "0.1.0"
+description = "Closed-loop catalysis workflows with Globus Compute"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["*"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: marks tests as integration tests (may require external services)",
+]
+asyncio_mode = "auto"
