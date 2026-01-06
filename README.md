@@ -93,9 +93,8 @@ pip install -e .
 ### Running on Spark (Remote)
 
 1. **Start vLLM server**:
-   ```bash
-   python scripts/start_vllm_server.py --model meta-llama/Llama-3.1-8B-Instruct
-   ```
+
+   See [VLLM_README.md](VLLM_README.md).
 
 2. **Start Academy agents**:
    ```bash
