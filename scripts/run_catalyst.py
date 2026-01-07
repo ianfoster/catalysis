@@ -58,37 +58,37 @@ def check_agents_on_spark(endpoint: str) -> dict:
             r.ping()
             result["redis"] = {"running": True}
 
-            # Count active agents
-            active_keys = r.keys("active:*")
-            active_count = sum(1 for k in active_keys if r.get(k) == b"ACTIVE")
-
-            # Look for agent type info in other keys
+            # Count agents by type (from agent:* keys) and status (from active:* keys)
             agent_types = {}
-            sample_keys = []
+            active_count = 0
+            total_count = 0
 
-            # Check different possible key patterns for agent metadata
-            for pattern in ["agent:*", "agents:*", "type:*", "meta:*", "registry:*"]:
-                keys = r.keys(pattern)
-                if keys:
-                    sample_keys.append(f"{pattern}: {len(keys)} keys")
-                    for key in keys[:3]:
-                        data = r.get(key)
-                        if data:
-                            sample_keys.append(f"  {key.decode()}: {data.decode()[:80] if len(data) < 100 else 'binary'}")
+            for key in r.keys("agent:*"):
+                try:
+                    agent_id = key.decode().replace("agent:", "")
+                    type_data = r.get(key)
+                    status = r.get(f"active:{agent_id}")
+                    is_active = status == b"ACTIVE"
 
-            # Also check what key patterns exist
-            all_keys = r.keys("*")
-            key_prefixes = {}
-            for k in all_keys:
-                prefix = k.decode().split(":")[0] if b":" in k else k.decode()
-                key_prefixes[prefix] = key_prefixes.get(prefix, 0) + 1
+                    if is_active:
+                        active_count += 1
+
+                    # Extract agent class name
+                    if type_data:
+                        # Format: "skills.shepherd.ShepherdAgent,skills.base_agent.TrackedAgent,..."
+                        first_class = type_data.decode().split(",")[0]
+                        class_name = first_class.split(".")[-1]  # Just the class name
+                        key_name = f"{class_name} ({'active' if is_active else 'inactive'})"
+                        agent_types[key_name] = agent_types.get(key_name, 0) + 1
+                    total_count += 1
+                except Exception:
+                    pass
 
             result["agents"] = {
-                "count": len(active_keys),
+                "total": total_count,
                 "active": active_count,
-                "key_prefixes": dict(sorted(key_prefixes.items(), key=lambda x: -x[1])[:10]),
+                "types": dict(sorted(agent_types.items())),
             }
-            result["sample_keys"] = sample_keys[:10]
         except Exception as e:
             result["redis"] = {"running": False, "error": str(e)}
             result["agents"] = {"count": 0}
@@ -550,15 +550,10 @@ Examples:
         redis_info = result.get("redis", {})
         print(f"Redis: {'running' if redis_info.get('running') else 'NOT running'}")
         agents = result.get("agents", {})
-        print(f"Registered agents: {agents.get('count', 0)} ({agents.get('active', 0)} active)")
-        if agents.get("key_prefixes"):
-            print("Redis key patterns:")
-            for prefix, count in agents["key_prefixes"].items():
-                print(f"  - {prefix}: {count}")
-        if result.get("sample_keys"):
-            print("Sample keys:")
-            for s in result["sample_keys"]:
-                print(f"  {s}")
+        print(f"Agents: {agents.get('total', 0)} total, {agents.get('active', 0)} active")
+        if agents.get("types"):
+            for agent_type, count in agents["types"].items():
+                print(f"  - {agent_type}: {count}")
         proc = result.get("agent_process", {})
         print(f"Agent process: {'running' if proc.get('running') else 'NOT running'}")
         print("=" * 60)
