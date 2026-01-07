@@ -6,7 +6,7 @@ Agentic Catalysis Discovery - An autonomous system for catalyst material discove
 
 Catalyst orchestrates closed-loop discovery workflows combining:
 - **LLM-based reasoning** for candidate proposal and test selection
-- **11 simulation agents** (ML potentials, DFT, MD, kinetics)
+- **Simulation agents** (ML potentials, DFT, kinetics)
 - **Distributed computing** via Globus Compute and Academy framework
 - **Adaptive budget management** for cost-effective exploration
 
@@ -15,60 +15,32 @@ Catalyst orchestrates closed-loop discovery workflows combining:
 ```
 Mac (local)                              Spark (remote)
 ┌─────────────────┐                      ┌─────────────────────────────────┐
-│ GeneratorAgent  │ ───Redis/GC────►     │ vLLM Server (port 8000)         │
-│ - propose       │                      │                                 │
-│ - collect       │                      │ ShepherdAgent(s)                │
-│ - converge      │                      │   └─► LLMProxyAgent             │
+│ GeneratorAgent  │◄──SSH tunnel────────►│ Redis (port 6379)               │
+│ (OpenAI LLM)    │   (port 6380)        │                                 │
+│                 │                      │ vLLM Server (port 8000)         │
+│ run_catalyst.py │◄──Globus Compute────►│   Llama-3.1-8B-Instruct         │
 └─────────────────┘                      │                                 │
+                                         │ ShepherdAgents (x4)             │
+                                         │   └─► LLMProxyAgent             │
+                                         │                                 │
                                          │ Simulation Agents:              │
-                                         │   ├─ MACEAgent                  │
-                                         │   ├─ CHGNetAgent                │
-                                         │   ├─ M3GNetAgent                │
-                                         │   ├─ CanteraAgent               │
-                                         │   ├─ StabilityAgent             │
-                                         │   ├─ SurrogateAgent             │
-                                         │   ├─ QEAgent (Quantum ESPRESSO) │
-                                         │   ├─ GPAWAgent                  │
-                                         │   ├─ OpenMMAgent                │
-                                         │   ├─ GROMACSAgent               │
-                                         │   └─ CatMAPAgent                │
+                                         │   ├─ MACEAgent      [ML]        │
+                                         │   ├─ CHGNetAgent    [ML]        │
+                                         │   ├─ CanteraAgent   [kinetics]  │
+                                         │   ├─ StabilityAgent [thermo]    │
+                                         │   └─ SurrogateAgent [fast]      │
                                          └─────────────────────────────────┘
 ```
-
-## Agents
-
-### Orchestration Agents
-
-| Agent | Description |
-|-------|-------------|
-| **GeneratorAgent** | Proposes catalyst candidates using LLM reasoning. Manages iteration loop and convergence detection. |
-| **ShepherdAgent** | Evaluates individual candidates. Uses LLM to select appropriate tests within budget constraints. |
-| **LLMProxyAgent** | Centralized LLM access with request tracking, token counting, and latency metrics. |
-
-### Simulation Agents
-
-| Agent | Method | Use Case |
-|-------|--------|----------|
-| **MACEAgent** | MACE ML potential | Fast screening, near-DFT accuracy |
-| **CHGNetAgent** | CHGNet ML potential | Secondary ML screening |
-| **M3GNetAgent** | M3GNet ML potential | Alternative ML potential (container-based) |
-| **CanteraAgent** | Cantera | Reactor kinetics, CO2 hydrogenation |
-| **StabilityAgent** | Thermodynamics | Phase stability analysis |
-| **SurrogateAgent** | Physics-informed | Fast surrogate models |
-| **QEAgent** | Quantum ESPRESSO | DFT calculations |
-| **GPAWAgent** | GPAW | DFT calculations |
-| **OpenMMAgent** | OpenMM | Molecular dynamics |
-| **GROMACSAgent** | GROMACS | Molecular dynamics |
-| **CatMAPAgent** | CatMAP | Microkinetic modeling |
 
 ## Quick Start
 
 ### Prerequisites
 
 - Python 3.12+
-- Redis (for agent coordination)
+- Redis running on Spark
 - Docker (for vLLM on GPU systems)
-- OpenAI API key or Argonne credentials
+- OpenAI API key (for Generator LLM)
+- Globus Compute endpoint on Spark
 
 ### Installation
 
@@ -76,60 +48,105 @@ Mac (local)                              Spark (remote)
 pip install -e .
 ```
 
-### Two-Script Workflow (Recommended)
+### One-Command Workflow
 
-**Step 1: Start agents on Spark**
+The unified `run_catalyst.py` script handles everything:
 
 ```bash
-# SSH to Spark, then:
+# Set your API key and endpoint
+export OPENAI_API_KEY="sk-..."
+export GC_ENDPOINT="your-endpoint-id"
+
+# Full workflow: start agents, create tunnel, run discovery
+python scripts/run_catalyst.py \
+    --endpoint $GC_ENDPOINT \
+    --spark-host spark \
+    --device cpu
+```
+
+This will:
+1. Start vLLM server on Spark (if not running)
+2. Start ShepherdAgents and SimulationAgents on Spark
+3. Create SSH tunnel to Spark's Redis
+4. Run GeneratorAgent locally with OpenAI
+5. Coordinate discovery via Redis
+
+### Common Operations
+
+```bash
+# Check agent status
+python scripts/run_catalyst.py --endpoint $GC_ENDPOINT --check-agents
+
+# Restart agents (stops, clears cache, updates code, starts)
+python scripts/run_catalyst.py --endpoint $GC_ENDPOINT --restart-agents --start-agents-only --device cpu
+
+# Run discovery (agents already running)
+python scripts/run_catalyst.py --endpoint $GC_ENDPOINT --spark-host spark --skip-agents
+
+# Clear all caches
+python scripts/run_catalyst.py --endpoint $GC_ENDPOINT --clear-cache
+
+# View agent logs
+python scripts/run_catalyst.py --endpoint $GC_ENDPOINT --logs
+
+# Update code on Spark
+python scripts/run_catalyst.py --endpoint $GC_ENDPOINT --update-code
+```
+
+### Manual Workflow (Alternative)
+
+If you prefer manual control:
+
+**On Spark:**
+```bash
 # Start vLLM server
 python scripts/start_vllm_server.py --model meta-llama/Llama-3.1-8B-Instruct
 
-# Start all agents (connects to Redis for coordination)
+# Start agents
 python scripts/run_spark_agents.py \
     --llm-url http://localhost:8000/v1 \
     --redis-host localhost \
-    --device cuda
+    --num-shepherds 4 \
+    --device cpu
 ```
 
-**Step 2: Run discovery from Mac**
-
+**On Mac:**
 ```bash
-# Set your API key
-export OPENAI_API_KEY="sk-..."
+# Create SSH tunnel
+ssh -N -L 6380:localhost:6379 spark &
 
-# Run Generator (connects to same Redis as Spark agents)
+# Run generator
 python scripts/run_generator.py \
     --redis-host localhost \
+    --redis-port 6380 \
     --generator-llm openai
 ```
 
-The Generator uses OpenAI/Argonne for reasoning, while Shepherds on Spark use the local vLLM.
+## Agents
 
-### Alternative: Globus Compute Mode
+### Orchestration Agents
 
-If you can't use Redis between Mac and Spark, use GC-based evaluation:
+| Agent | Location | Description |
+|-------|----------|-------------|
+| **GeneratorAgent** | Mac | Proposes candidates using OpenAI. Manages iteration loop and convergence. |
+| **ShepherdAgent** | Spark | Evaluates candidates. Uses local vLLM to select tests within budget. |
+| **LLMProxyAgent** | Spark | Centralized LLM access with request tracking and metrics. |
 
-```bash
-python scripts/run_discovery.py \
-    --endpoint $GC_ENDPOINT \
-    --generator-llm openai \
-    --shepherd-llm-url http://spark:8000/v1
-```
+### Simulation Agents
 
-### Using Argonne Inference API
-
-For the Generator (instead of OpenAI):
-
-```bash
-# Get authentication token
-python scripts/argonne_auth.py
-
-# Run with Argonne
-python scripts/run_generator.py \
-    --redis-host localhost \
-    --generator-llm argonne
-```
+| Agent | Method | Status | Use Case |
+|-------|--------|--------|----------|
+| **MACEAgent** | MACE ML potential | ✅ Active | Fast screening, structure relaxation |
+| **CHGNetAgent** | CHGNet ML potential | ✅ Active | Alternative ML screening |
+| **CanteraAgent** | Cantera | ✅ Active | Reactor kinetics, CO2 hydrogenation |
+| **StabilityAgent** | Thermodynamics | ✅ Active | Phase stability analysis |
+| **SurrogateAgent** | Physics-informed | ✅ Active | Fast surrogate models |
+| **M3GNetAgent** | M3GNet ML potential | ⚠️ Container | Requires separate container |
+| **QEAgent** | Quantum ESPRESSO | ❌ Disabled | DFT (not configured) |
+| **GPAWAgent** | GPAW | ❌ Disabled | DFT (not configured) |
+| **OpenMMAgent** | OpenMM | ❌ Disabled | No force field for inorganics |
+| **GROMACSAgent** | GROMACS | ❌ Disabled | Not implemented |
+| **CatMAPAgent** | CatMAP | ❌ Disabled | Not implemented |
 
 ## Configuration
 
@@ -140,21 +157,6 @@ run:
   max_iterations: 3
   concurrency: 32
 
-globus_compute:
-  endpoint_id: "your-endpoint-id"
-  functions:
-    fast_surrogate: "function-id"
-    ml_screening: "function-id"
-    # ... more functions
-
-shepherd:
-  llm:
-    mode: "shared"
-    model: "meta-llama/Meta-Llama-3.1-70B-Instruct"
-  budget:
-    default: 100.0
-    max: 1000.0
-
 academy:
   enabled: true
   llm:
@@ -162,38 +164,73 @@ academy:
     vllm:
       model: "meta-llama/Llama-3.1-8B-Instruct"
       port: 8000
+
+  shepherds:
+    num_concurrent: 4
+    budget_per_candidate: 150.0
+    timeout: 3600
 ```
 
 ## Scripts Reference
 
 | Script | Purpose |
 |--------|---------|
-| `run_spark_agents.py` | Launch all Academy agents on Spark |
-| `run_generator.py` | Run GeneratorAgent on Mac (connects to Spark via Redis) |
-| `run_discovery.py` | Discovery via Globus Compute (alternative to Academy) |
+| **`run_catalyst.py`** | **Unified launcher** - handles agents, tunnel, and discovery |
+| `run_spark_agents.py` | Launch Academy agents on Spark (manual mode) |
+| `run_generator.py` | Run GeneratorAgent standalone (manual mode) |
 | `start_vllm_server.py` | Start vLLM in Docker container |
 | `argonne_auth.py` | Get Globus/Argonne auth token |
-| `register_gc_functions.py` | Register functions with Globus Compute |
-| `monitor_progress.py` | Monitor running discovery |
-| `watch_narrative.py` | Real-time discovery narrative |
-| `dashboard.py` | Web dashboard for results |
-| `agent_status.py` | Check agent health |
+| `watch_narrative.py` | Real-time discovery narrative via Redis |
+| `dashboard.py` | Status dashboard |
+
+### run_catalyst.py Options
+
+```
+Connection:
+  --endpoint ID         Globus Compute endpoint ID on Spark
+  --spark-host HOST     Spark hostname for SSH (default: spark)
+  --redis-port PORT     Local Redis port for tunnel (default: 6380)
+
+Agent Management:
+  --check-agents        Check agent status and exit
+  --stop-agents         Stop agents and exit
+  --restart-agents      Stop, clear cache, update code, restart
+  --start-agents-only   Start agents and exit (no discovery)
+  --update-code         Git pull on Spark
+  --clear-cache         Clear local and Redis caches
+  --logs                Show agent logs from Spark
+
+Skip Options:
+  --skip-agents         Don't start agents (already running)
+  --skip-tunnel         Don't create SSH tunnel (already open)
+
+Agent Config:
+  --llm-model MODEL     LLM model on Spark
+  --num-shepherds N     Number of ShepherdAgents (default: 4)
+  --device {cpu,cuda}   Device for ML agents
+
+Generator Config:
+  --generator-llm TYPE  openai or argonne (default: openai)
+  --max-iterations N    Max discovery iterations (default: 3)
+  --candidates-per-iteration N  Candidates per iteration (default: 6)
+  --budget FLOAT        Budget per candidate (default: 100.0)
+```
 
 ## Monitoring
 
+### Watch discovery narrative
+```bash
+python scripts/watch_narrative.py --redis-host localhost --redis-port 6380
+```
+
 ### Check Redis keys
 ```bash
-redis-cli keys '*'
+ssh spark 'redis-cli keys "*"'
 ```
 
-### Watch narrative log
+### View agent logs
 ```bash
-python scripts/watch_narrative.py
-```
-
-### Agent status
-```bash
-python scripts/agent_status.py
+python scripts/run_catalyst.py --endpoint $GC_ENDPOINT --logs
 ```
 
 ## Project Structure
@@ -205,25 +242,21 @@ catalyst/
 │   ├── shepherd.py            # ShepherdAgent
 │   ├── llm_proxy_agent.py     # LLMProxyAgent
 │   ├── base_agent.py          # TrackedAgent base class
-│   └── sim_agents/            # 11 simulation agents
+│   └── sim_agents/            # Simulation agents
 │       ├── mace_agent.py
 │       ├── chgnet_agent.py
 │       ├── cantera_agent.py
 │       └── ...
 ├── orchestration/             # Support modules
-│   ├── test_registry.py       # Test specifications
+│   ├── test_registry.py       # Test specifications & runtime tracking
 │   ├── llm_client.py          # LLM client wrapper
-│   ├── generator_prompts.py   # LLM prompts
-│   ├── shepherd_prompts.py
+│   ├── generator_prompts.py   # Generator LLM prompts
+│   ├── shepherd_prompts.py    # Shepherd LLM prompts
 │   ├── generator_state.py     # State persistence
-│   ├── narrative.py           # Discovery logging
+│   ├── narrative.py           # Discovery logging to Redis
 │   └── capabilities.py        # Simulation capabilities
 ├── hpc/                       # HPC adapters
 │   └── globus_compute.py      # Globus Compute wrapper
-├── tools/                     # Simulation tool wrappers
-│   ├── openmm_tool.py
-│   ├── gmx_tool.py
-│   └── rdkit_tool.py
 ├── scripts/                   # Entry points
 ├── config/                    # Configuration files
 ├── tests/                     # Test suite
@@ -232,13 +265,15 @@ catalyst/
 
 ## Discovery Workflow
 
-1. **GeneratorAgent** proposes N candidates using LLM reasoning
-2. For each candidate, a **ShepherdAgent** is spawned
-3. Shepherd uses LLM to select tests within budget
-4. Tests are dispatched to appropriate **SimulationAgents**
-5. Results are collected and assessed
-6. GeneratorAgent checks for convergence
-7. If not converged, iterate with improved proposals
+1. **GeneratorAgent** (Mac) proposes N candidates using OpenAI
+2. Candidates sent to **ShepherdAgents** (Spark) via Redis
+3. Each Shepherd runs two phases:
+   - **Phase 1**: All fast tests in parallel (ML screening, surrogate)
+   - **Phase 2**: LLM selects slow tests based on Phase 1 results
+4. Tests dispatched to appropriate **SimulationAgents**
+5. Results assessed by Shepherd's LLM → viability score
+6. Scores returned to Generator
+7. Generator checks convergence; if not converged, proposes new candidates
 
 ## Development
 
@@ -247,9 +282,10 @@ catalyst/
 pytest tests/
 ```
 
-### Integration tests (requires services)
+### Tag releases
 ```bash
-pytest tests/ -m integration
+git tag -a v0.1-description -m "Description"
+git push origin v0.1-description
 ```
 
 ## License
