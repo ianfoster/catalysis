@@ -141,6 +141,6 @@ academy:
 
   # ShepherdAgent spawning
   shepherds:
-    num_concurrent: 8  # Number of ShepherdAgents to run in parallel
+    num_concurrent: 4  # Number of ShepherdAgents to run in parallel
     budget_per_candidate: 150.0
     timeout: 3600

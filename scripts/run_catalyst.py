@@ -30,6 +30,72 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 
+def clear_caches(endpoint: str | None = None) -> dict:
+    """Clear local and remote caches."""
+    result = {"ok": True, "cleared": {}}
+
+    # Clear local cache files
+    local_files = [
+        "data/generator_state.json",
+        "data/generator_results.jsonl",
+        "data/shepherd_cache.jsonl",
+        "data/char_cache.jsonl",
+        "data/discovery_results.json",
+    ]
+
+    for f in local_files:
+        path = Path(f)
+        if path.exists():
+            path.unlink()
+            result["cleared"][f] = "deleted"
+        else:
+            result["cleared"][f] = "not found"
+
+    # Clear remote Redis caches if endpoint provided
+    if endpoint:
+        from globus_compute_sdk import Client, Executor
+
+        def clear_redis_cache_gc(cfg: dict) -> dict:
+            """Clear Redis caches on Spark."""
+            result = {"ok": False, "cleared": {}}
+            try:
+                import redis
+                r = redis.Redis(host="localhost", port=6379)
+
+                # Clear narrative logs
+                narrative_keys = r.keys("narrative:*")
+                if narrative_keys:
+                    r.delete(*narrative_keys)
+                result["cleared"]["narrative"] = len(narrative_keys)
+
+                # Clear test_runtime keys
+                runtime_keys = r.keys("test_runtime:*")
+                if runtime_keys:
+                    r.delete(*runtime_keys)
+                result["cleared"]["test_runtime"] = len(runtime_keys)
+
+                # Clear any result caches
+                cache_keys = r.keys("cache:*")
+                if cache_keys:
+                    r.delete(*cache_keys)
+                result["cleared"]["cache"] = len(cache_keys)
+
+                result["ok"] = True
+            except Exception as e:
+                result["error"] = str(e)
+            return result
+
+        client = Client()
+        func_id = client.register_function(clear_redis_cache_gc)
+
+        with Executor(endpoint_id=endpoint) as ex:
+            future = ex.submit_to_registered_function(func_id, args=({},))
+            remote_result = future.result(timeout=60)
+            result["remote"] = remote_result
+
+    return result
+
+
 def check_agents_on_spark(endpoint: str) -> dict:
     """Check status of agents on Spark via Globus Compute."""
     from globus_compute_sdk import Client, Executor
@@ -128,7 +194,7 @@ def stop_agents_on_spark(endpoint: str) -> dict:
         """Stop Academy agents on Spark."""
         import subprocess
 
-        result = {"ok": False}
+        result = {"ok": False, "cleared": {}}
 
         # Kill any running agent processes
         try:
@@ -137,16 +203,31 @@ def stop_agents_on_spark(endpoint: str) -> dict:
                 ["pkill", "-f", "run_spark_agents.py"],
                 capture_output=True,
             )
-            result["killed_agents"] = proc.returncode == 0
+            result["killed_process"] = proc.returncode == 0
 
-            # Also clear Redis agent registrations
+            # Clear ALL agent-related Redis keys
             try:
                 import redis
                 r = redis.Redis(host="localhost", port=6379)
-                keys = r.keys("active:*")
-                if keys:
-                    r.delete(*keys)
-                result["cleared_redis_keys"] = len(keys)
+
+                # Clear active:* keys
+                active_keys = r.keys("active:*")
+                if active_keys:
+                    r.delete(*active_keys)
+                result["cleared"]["active"] = len(active_keys)
+
+                # Clear agent:* keys (agent type registrations)
+                agent_keys = r.keys("agent:*")
+                if agent_keys:
+                    r.delete(*agent_keys)
+                result["cleared"]["agent"] = len(agent_keys)
+
+                # Clear queue:* keys (message queues)
+                queue_keys = r.keys("queue:*")
+                if queue_keys:
+                    r.delete(*queue_keys)
+                result["cleared"]["queue"] = len(queue_keys)
+
             except Exception as e:
                 result["redis_error"] = str(e)
 
@@ -298,39 +379,75 @@ def start_agents_on_spark(endpoint: str, config: dict) -> dict:
         # Start agents in background using nohup
         logger.info("Starting Academy agents...")
         try:
-            # Check if agents already running
+            import os
             r = redis.Redis(host="localhost", port=6379)
-            keys = r.keys("active:*")
-            if len(keys) > 5:  # Already have agents
+
+            # Check if process already running
+            proc_check = subprocess.run(
+                ["pgrep", "-f", "run_spark_agents.py"],
+                capture_output=True, text=True
+            )
+            if proc_check.returncode == 0:
+                pids = proc_check.stdout.strip()
+                keys = r.keys("active:*")
+                active = sum(1 for k in keys if r.get(k) == b"ACTIVE")
                 result["agents"] = "already_running"
-                result["agent_count"] = len(keys)
+                result["pids"] = pids
+                result["agent_count"] = active
                 result["ok"] = True
                 return result
 
             # Start agents via subprocess (detached)
-            import os
             catalysis_dir = os.path.expanduser("~/catalysis")
+            log_file = "/tmp/spark_agents.log"
+
+            # Clear old log
+            with open(log_file, "w") as f:
+                f.write(f"Starting agents at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+
             cmd = f"""cd {catalysis_dir} && nohup python scripts/run_spark_agents.py \
                 --llm-url http://localhost:{llm_port}/v1 \
                 --redis-host localhost \
                 --num-shepherds {num_shepherds} \
                 --device {device} \
-                > /tmp/spark_agents.log 2>&1 &"""
+                >> {log_file} 2>&1 &"""
 
+            logger.info(f"Running: {cmd}")
             subprocess.run(cmd, shell=True, check=True)
 
             # Wait for agents to register
             for i in range(30):
                 time.sleep(2)
+
+                # Check if process started
+                proc_check = subprocess.run(
+                    ["pgrep", "-f", "run_spark_agents.py"],
+                    capture_output=True, text=True
+                )
+                if proc_check.returncode != 0:
+                    # Process died - read log
+                    try:
+                        with open(log_file) as f:
+                            result["log_tail"] = f.read()[-500:]
+                    except:
+                        pass
+                    result["error"] = "Agent process died"
+                    return result
+
+                # Check for active agents
                 keys = r.keys("active:*")
-                if len(keys) >= num_shepherds:
+                active = sum(1 for k in keys if r.get(k) == b"ACTIVE")
+                if active >= num_shepherds:
                     result["agents"] = "started"
-                    result["agent_count"] = len(keys)
+                    result["agent_count"] = active
                     result["ok"] = True
                     return result
 
+            # Timed out but process running
+            keys = r.keys("active:*")
+            active = sum(1 for k in keys if r.get(k) == b"ACTIVE")
             result["agents"] = "starting"
-            result["agent_count"] = len(keys)
+            result["agent_count"] = active
             result["ok"] = True
 
         except Exception as e:
@@ -499,6 +616,7 @@ Examples:
     parser.add_argument("--update-code", action="store_true", help="Update code on Spark via git pull")
     parser.add_argument("--restart-agents", action="store_true", help="Stop agents, update code, restart agents")
     parser.add_argument("--start-agents-only", action="store_true", help="Start agents on Spark and exit (no generator)")
+    parser.add_argument("--clear-cache", action="store_true", help="Clear local caches and Spark Redis caches")
 
     # Skip options
     parser.add_argument("--skip-agents", action="store_true", help="Skip starting agents (already running)")
@@ -556,6 +674,22 @@ Examples:
                 print(f"  - {agent_type}: {count}")
         proc = result.get("agent_process", {})
         print(f"Agent process: {'running' if proc.get('running') else 'NOT running'}")
+        print("=" * 60)
+        sys.exit(0)
+
+    if args.clear_cache:
+        logging.info("Clearing caches...")
+        result = clear_caches(args.endpoint)
+        print("\n" + "=" * 60)
+        print("Cache Cleared")
+        print("=" * 60)
+        print("Local files:")
+        for f, status in result.get("cleared", {}).items():
+            print(f"  - {f}: {status}")
+        if result.get("remote"):
+            print("Remote Redis:")
+            for k, v in result["remote"].get("cleared", {}).items():
+                print(f"  - {k}: {v} keys")
         print("=" * 60)
         sys.exit(0)
 
@@ -621,9 +755,13 @@ Examples:
 
             if not result.get("ok"):
                 logging.error(f"Failed to start agents: {result.get('error')}")
+                if result.get("log_tail"):
+                    logging.error(f"Log output:\n{result.get('log_tail')}")
                 sys.exit(1)
 
             logging.info(f"Agents status: vLLM={result.get('vllm')}, agents={result.get('agents')}, count={result.get('agent_count')}")
+            if result.get("pids"):
+                logging.info(f"Agent PIDs: {result.get('pids')}")
 
             if args.start_agents_only:
                 logging.info("Agents started. Exiting (--start-agents-only).")
