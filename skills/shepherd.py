@@ -532,7 +532,18 @@ class ShepherdAgent(TrackedAgent):
                         only_tests=slow_test_names,  # Keep filter to slow tests
                     )
         else:
-            logger.info("Phase 2: No affordable slow tests or budget exhausted")
+            # Explain why we're skipping phase 2
+            if budget_spent >= budget_total:
+                logger.info("Phase 2: Skipped - budget exhausted (spent %.1f/%.1f)", budget_spent, budget_total)
+            elif not slow_tests:
+                logger.info("Phase 2: Skipped - no slow tests available")
+            elif not affordable_slow:
+                logger.info(
+                    "Phase 2: Skipped - %d slow tests exist but none affordable (remaining budget: %.1f, cheapest: %.1f)",
+                    len(slow_tests),
+                    budget_total - budget_spent,
+                    min(t.cost for t in slow_tests) if slow_tests else 0,
+                )
 
         # Generate final assessment
         final_assessment = await self._generate_final_assessment(
