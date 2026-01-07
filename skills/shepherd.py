@@ -142,6 +142,13 @@ class ShepherdAgent(TrackedAgent):
         self._version: str = "dev"
         self._system_prompt: str = ""
 
+    @property
+    def _tag(self) -> str:
+        """Log tag with shepherd ID and current candidate."""
+        if self._current_candidate:
+            return f"[{self._shepherd_id}|{self._current_candidate}]"
+        return f"[{self._shepherd_id}]"
+
     async def agent_on_startup(self) -> None:
         """Initialize resources after agent starts."""
         # Get system prompt WITHOUT capabilities (they confuse the LLM about test names)
@@ -296,12 +303,7 @@ class ShepherdAgent(TrackedAgent):
         fast_tests = self._runtime_tracker.get_fast_tests(threshold_s=FAST_TEST_THRESHOLD_S)
         affordable_fast = [t for t in fast_tests if t.cost <= budget_total]
 
-        logger.info(
-            "[%s|%s] Phase 1: Running %d fast tests in parallel",
-            self._shepherd_id,
-            self._current_candidate,
-            len(affordable_fast),
-        )
+        logger.info("%s Phase 1: %d fast tests", self._tag, len(affordable_fast))
         narrative._write(f"   Phase 1: Running {len(affordable_fast)} fast tests in parallel...")
 
         if affordable_fast:
@@ -321,7 +323,7 @@ class ShepherdAgent(TrackedAgent):
                     }
                 except Exception as e:
                     elapsed = time.time() - t0
-                    logger.error("Fast test %s failed: %s", test_spec.name, e)
+                    logger.error("%s Fast test %s failed: %s", self._tag, test_spec.name, e)
                     return {
                         "test": test_spec.name,
                         "result": {"error": str(e), "ok": False},
@@ -361,13 +363,7 @@ class ShepherdAgent(TrackedAgent):
                 "budget_spent": budget_spent,
             })
 
-            logger.info(
-                "[%s|%s] Phase 1 complete: %d tests, cost=%.2f",
-                self._shepherd_id,
-                self._current_candidate,
-                len(fast_results),
-                budget_spent,
-            )
+            logger.info("%s Phase 1 done: %d tests, cost=%.1f", self._tag, len(fast_results), budget_spent)
 
         # ========== PHASE 2: LLM decides on slow tests ==========
         slow_tests = self._runtime_tracker.get_slow_tests(threshold_s=FAST_TEST_THRESHOLD_S)
@@ -380,13 +376,7 @@ class ShepherdAgent(TrackedAgent):
             # Get names of slow tests to show in prompt (exclude fast tests)
             slow_test_names = {t.name for t in slow_tests}
 
-            logger.info(
-                "[%s|%s] Phase 2: Consulting LLM about %d slow tests: %s",
-                self._shepherd_id,
-                self._current_candidate,
-                len(affordable_slow),
-                list(slow_test_names),
-            )
+            logger.info("%s Phase 2: %d slow tests available", self._tag, len(affordable_slow))
             narrative._write(f"   Phase 2: Consulting LLM about {len(affordable_slow)} slow tests...")
 
             # Build prompt for expensive test decision - ONLY show slow tests
@@ -459,7 +449,7 @@ class ShepherdAgent(TrackedAgent):
                     # Only allow slow tests in phase 2 (fast tests already run)
                     estimated_runtime = self._runtime_tracker.get_estimated_runtime(test_name)
                     if estimated_runtime < FAST_TEST_THRESHOLD_S:
-                        logger.warning("LLM suggested fast test %s in phase 2 (not allowed)", test_name)
+                        logger.warning("%s LLM suggested fast test %s (skipped)", self._tag, test_name)
                         history[-1]["error"] = f"Fast test '{test_name}' not allowed in phase 2"
                         consecutive_invalid += 1
                         continue
@@ -534,16 +524,12 @@ class ShepherdAgent(TrackedAgent):
         else:
             # Explain why we're skipping phase 2
             if budget_spent >= budget_total:
-                logger.info("Phase 2: Skipped - budget exhausted (spent %.1f/%.1f)", budget_spent, budget_total)
+                logger.info("%s Phase 2: Skipped - budget exhausted", self._tag)
             elif not slow_tests:
-                logger.info("Phase 2: Skipped - no slow tests available")
+                logger.info("%s Phase 2: Skipped - no slow tests defined", self._tag)
             elif not affordable_slow:
-                logger.info(
-                    "Phase 2: Skipped - %d slow tests exist but none affordable (remaining budget: %.1f, cheapest: %.1f)",
-                    len(slow_tests),
-                    budget_total - budget_spent,
-                    min(t.cost for t in slow_tests) if slow_tests else 0,
-                )
+                logger.info("%s Phase 2: Skipped - slow tests too expensive (need %.1f, have %.1f)",
+                    self._tag, min(t.cost for t in slow_tests), budget_total - budget_spent)
 
         # Generate final assessment
         final_assessment = await self._generate_final_assessment(
@@ -572,14 +558,7 @@ class ShepherdAgent(TrackedAgent):
         # Log completion with score
         score = final_assessment.get("viability_score", 0)
         rec = final_assessment.get("recommendation", "?")
-        logger.info(
-            "[%s|%s] Done: score=%d rec=%s cost=%.1f",
-            self._shepherd_id,
-            self._current_candidate,
-            score,
-            rec,
-            budget_spent,
-        )
+        logger.info("%s Done: score=%d %s", self._tag, score, rec)
 
         # Clear current candidate
         self._current_candidate = None
@@ -824,7 +803,7 @@ class ShepherdAgent(TrackedAgent):
             logger.warning("Agent %s not available, falling back to surrogate", agent_name)
             action_name = "screening"
 
-        logger.info("Dispatching to %s.%s", agent_name, action_name)
+        logger.info("%s -> %s.%s", self._tag, agent_name, action_name)
 
         # Get the action method
         action_method = getattr(agent, action_name, None)
@@ -840,7 +819,7 @@ class ShepherdAgent(TrackedAgent):
 
         # Add timing to result
         result["elapsed_s"] = round(elapsed, 2)
-        logger.info("Completed %s.%s in %.2fs", agent_name, action_name, elapsed)
+        logger.info("%s <- %s.%s (%.1fs)", self._tag, agent_name, action_name, elapsed)
 
         if not result.get("ok"):
             raise RuntimeError(f"{agent_name}.{action_name} error: {result.get('error')}")
@@ -977,7 +956,7 @@ class ShepherdAgent(TrackedAgent):
             return assessment
         except Exception as e:
             error_msg = str(e)
-            logger.error("Final assessment generation failed: %s", error_msg)
+            logger.error("%s Final assessment failed: %s", self._tag, error_msg)
 
             # Return error with score=0 so it's clearly a failure, not a mediocre result
             return {
