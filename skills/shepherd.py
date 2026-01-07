@@ -347,9 +347,9 @@ class ShepherdAgent(TrackedAgent):
                 })
                 budget_spent += r["cost"]
 
-                # Record runtime for adaptive classification
-                # Note: use "in" check since elapsed=0.0 is falsy but valid
-                if "elapsed" in r:
+                # Record runtime for adaptive classification (only for successful tests)
+                # Failed tests may complete quickly due to errors, skewing classification
+                if "elapsed" in r and r.get("ok", False):
                     self._runtime_tracker.record(r["test"], r["elapsed"])
 
                 # Log to narrative
@@ -518,8 +518,8 @@ class ShepherdAgent(TrackedAgent):
                             "result": {"error": str(e), "ok": False},
                             "cost": test_spec.cost,
                         })
-                        # Still record runtime even for failed tests
-                        self._runtime_tracker.record(test_name, elapsed)
+                        # Don't record runtime for failed tests - they may fail quickly
+                        # and skew the classification (making slow tests look fast)
                         budget_spent += test_spec.cost
                         history[-1]["error"] = str(e)
 
