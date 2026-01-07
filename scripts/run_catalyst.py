@@ -405,12 +405,14 @@ def start_agents_on_spark(endpoint: str, config: dict) -> dict:
             with open(log_file, "w") as f:
                 f.write(f"Starting agents at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
 
-            cmd = f"""cd {catalysis_dir} && nohup python scripts/run_spark_agents.py \
+            # Use setsid to fully detach from any session/process group
+            # This prevents GC from killing the process when function returns
+            cmd = f"""cd {catalysis_dir} && setsid python scripts/run_spark_agents.py \
                 --llm-url http://localhost:{llm_port}/v1 \
                 --redis-host localhost \
                 --num-shepherds {num_shepherds} \
                 --device {device} \
-                >> {log_file} 2>&1 &"""
+                >> {log_file} 2>&1 < /dev/null &"""
 
             logger.info(f"Running: {cmd}")
             subprocess.run(cmd, shell=True, check=True)
