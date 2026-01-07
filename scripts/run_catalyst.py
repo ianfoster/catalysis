@@ -740,6 +740,13 @@ Examples:
         stop_result = stop_agents_on_spark(args.endpoint)
         logging.info(f"Stop result: {stop_result}")
 
+        # Clear runtime data (avoids stale classification from failed tests)
+        logging.info("=" * 60)
+        logging.info("Clearing stale runtime data...")
+        logging.info("=" * 60)
+        cache_result = clear_caches(args.endpoint)
+        logging.info(f"Cleared: {cache_result.get('remote', {}).get('cleared', {})}")
+
         # Update code
         logging.info("=" * 60)
         logging.info("Updating code on Spark...")
