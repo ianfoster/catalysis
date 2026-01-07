@@ -181,6 +181,7 @@ def build_reasoning_prompt(
     results: list[dict[str, Any]],
     budget_total: float,
     budget_spent: float,
+    only_tests: set[str] | None = None,
 ) -> str:
     """Build the reasoning prompt for next action decision.
 
@@ -189,6 +190,7 @@ def build_reasoning_prompt(
         results: List of completed test results
         budget_total: Total budget allocated
         budget_spent: Budget spent so far
+        only_tests: If provided, only show these tests (for phase 2 slow-only)
 
     Returns:
         Formatted prompt string
@@ -204,13 +206,16 @@ def build_reasoning_prompt(
     else:
         completed_list = "None yet"
 
-    # Build explicit list of valid test names
-    valid_test_names = ", ".join(sorted(AVAILABLE_TESTS.keys()))
+    # Build explicit list of valid test names (filtered if only_tests specified)
+    if only_tests:
+        valid_test_names = ", ".join(sorted(only_tests))
+    else:
+        valid_test_names = ", ".join(sorted(AVAILABLE_TESTS.keys()))
 
     return REASONING_PROMPT.format(
         candidate_json=format_candidate(candidate),
         valid_test_names=valid_test_names,
-        tests_table=format_tests_for_prompt(completed_tests, budget_remaining),
+        tests_table=format_tests_for_prompt(completed_tests, budget_remaining, only_tests),
         completed_list=completed_list,
         results_section=format_results(results),
         budget_total=budget_total,

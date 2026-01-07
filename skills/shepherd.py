@@ -377,20 +377,25 @@ class ShepherdAgent(TrackedAgent):
         ]
 
         if affordable_slow and budget_spent < budget_total:
+            # Get names of slow tests to show in prompt (exclude fast tests)
+            slow_test_names = {t.name for t in slow_tests}
+
             logger.info(
-                "[%s|%s] Phase 2: Consulting LLM about %d slow tests",
+                "[%s|%s] Phase 2: Consulting LLM about %d slow tests: %s",
                 self._shepherd_id,
                 self._current_candidate,
                 len(affordable_slow),
+                list(slow_test_names),
             )
             narrative._write(f"   Phase 2: Consulting LLM about {len(affordable_slow)} slow tests...")
 
-            # Build prompt for expensive test decision
+            # Build prompt for expensive test decision - ONLY show slow tests
             prompt = build_reasoning_prompt(
                 candidate=candidate,
                 results=results,
                 budget_total=budget_total,
                 budget_spent=budget_spent,
+                only_tests=slow_test_names,  # Filter to slow tests only
             )
 
             iteration = 0
@@ -454,7 +459,9 @@ class ShepherdAgent(TrackedAgent):
                     # Only allow slow tests in phase 2 (fast tests already run)
                     estimated_runtime = self._runtime_tracker.get_estimated_runtime(test_name)
                     if estimated_runtime < FAST_TEST_THRESHOLD_S:
-                        logger.info("Skipping fast test %s in phase 2 (already run)", test_name)
+                        logger.warning("LLM suggested fast test %s in phase 2 (not allowed)", test_name)
+                        history[-1]["error"] = f"Fast test '{test_name}' not allowed in phase 2"
+                        consecutive_invalid += 1
                         continue
 
                     # Check if already run
@@ -522,6 +529,7 @@ class ShepherdAgent(TrackedAgent):
                         results=results,
                         budget_total=budget_total,
                         budget_spent=budget_spent,
+                        only_tests=slow_test_names,  # Keep filter to slow tests
                     )
         else:
             logger.info("Phase 2: No affordable slow tests or budget exhausted")

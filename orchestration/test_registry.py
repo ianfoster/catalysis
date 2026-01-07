@@ -309,12 +309,14 @@ def check_prerequisites(test_name: str, completed_tests: set[str]) -> tuple[bool
 def format_tests_for_prompt(
     completed_tests: set[str] | None = None,
     budget_remaining: float | None = None,
+    only_tests: set[str] | None = None,
 ) -> str:
     """Format test registry as table for LLM prompt.
 
     Args:
         completed_tests: Set of already-completed test names (to show status)
         budget_remaining: Remaining budget (to show affordability)
+        only_tests: If provided, only show these test names (for phase 2 slow-only)
 
     Returns:
         Formatted markdown table string
@@ -327,6 +329,9 @@ def format_tests_for_prompt(
     ]
 
     for name, spec in AVAILABLE_TESTS.items():
+        # Filter to only requested tests if specified
+        if only_tests is not None and name not in only_tests:
+            continue
         # Status indicator
         if spec.method_status == "disabled":
             continue  # Skip disabled tests entirely
