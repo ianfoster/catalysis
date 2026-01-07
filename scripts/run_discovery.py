@@ -2,30 +2,32 @@
 """Run catalyst discovery pipeline.
 
 This script orchestrates the full discovery pipeline:
-1. Optionally starts llama-cpp LLM server on Spark via Globus Compute
-2. Creates a GeneratorAgent on the local machine (Mac)
-3. Runs the discovery loop with ShepherdAgents on Spark
+1. Creates a GeneratorAgent on the local machine (Mac) using OpenAI/Argonne LLM
+2. Runs the discovery loop with ShepherdAgents on Spark via Globus Compute
+3. Shepherds use the vLLM server on Spark for their LLM reasoning
 
 Architecture:
     Mac (local)                          Spark (remote)
     ┌─────────────────┐                  ┌─────────────────────────────┐
-    │ GeneratorAgent  │ ──GC tasks──►    │ llama-cpp server (port 8080)│
-    │ - propose       │                  │                             │
-    │ - collect       │                  │ ShepherdAgent (GC task 1)   │
-    │ - converge      │                  │ ShepherdAgent (GC task 2)   │
-    └─────────────────┘                  │ ...                         │
-                                         └─────────────────────────────┘
+    │ GeneratorAgent  │ ──GC tasks──►    │ vLLM server (port 8000)     │
+    │ (OpenAI/Argonne)│                  │                             │
+    │ - propose       │                  │ ShepherdAgent (GC task 1)   │
+    │ - collect       │                  │ ShepherdAgent (GC task 2)   │
+    │ - converge      │                  │ ...                         │
+    └─────────────────┘                  └─────────────────────────────┘
 
 Usage:
-    # Basic: Use existing LLM server on Spark
-    python scripts/run_discovery.py --endpoint $GC_ENDPOINT --llm-url http://spark:8080/v1
-
-    # Full: Start LLM server, then run discovery
+    # Use OpenAI for Generator, Spark vLLM for Shepherds
     python scripts/run_discovery.py --endpoint $GC_ENDPOINT \\
-        --start-llm --model /path/to/model.gguf
+        --generator-llm openai --shepherd-llm-url http://spark:8000/v1
+
+    # Use Argonne inference for Generator
+    python scripts/run_discovery.py --endpoint $GC_ENDPOINT \\
+        --generator-llm argonne --shepherd-llm-url http://spark:8000/v1
 
     # Test mode with fewer iterations
-    python scripts/run_discovery.py --endpoint $GC_ENDPOINT --llm-url http://spark:8080/v1 \\
+    python scripts/run_discovery.py --endpoint $GC_ENDPOINT \\
+        --generator-llm openai --shepherd-llm-url http://spark:8000/v1 \\
         --max-iterations 2 --candidates-per-iteration 2
 """
 
@@ -133,15 +135,15 @@ def check_llm_server(url: str, timeout: int = 10) -> bool:
 async def run_discovery(
     config: dict,
     gc_endpoint: str,
-    llm_url: str,
+    shepherd_llm_url: str,
     gc_function_map: dict | None = None,
 ) -> dict:
     """Run the catalyst discovery loop.
 
     Args:
-        config: Full configuration dict
+        config: Full configuration dict (generator.llm has Generator's LLM config)
         gc_endpoint: Globus Compute endpoint ID
-        llm_url: URL to LLM server on Spark
+        shepherd_llm_url: URL to LLM server on Spark (for Shepherds)
         gc_function_map: Optional GC function IDs for simulations
 
     Returns:
@@ -152,16 +154,22 @@ async def run_discovery(
     generator_config = config.get("generator", {})
     shepherd_config = config.get("shepherd", {})
 
+    # Generator uses config-based LLM (OpenAI/Argonne), not Spark
+    gen_llm = generator_config.get("llm", {})
     logging.info("Creating GeneratorAgent...")
+    logging.info(f"  Generator LLM: {gen_llm.get('model', 'default')} via {gen_llm.get('base_url', gen_llm.get('shared_url', 'config'))}")
+    logging.info(f"  Shepherd LLM: {shepherd_llm_url}")
     logging.info(f"  GC Endpoint: {gc_endpoint}")
-    logging.info(f"  LLM URL: {llm_url}")
+
+    # Pass shepherd_llm_url to shepherd_config so GC tasks use Spark LLM
+    shepherd_config["llm_url"] = shepherd_llm_url
 
     generator = GeneratorAgent(
         config=generator_config,
         shepherd_config=shepherd_config,
         gc_function_map=gc_function_map or {},
         gc_endpoint=gc_endpoint,
-        llm_url=llm_url,
+        llm_url=None,  # Generator uses config, not passed URL
     )
 
     logging.info("Starting discovery loop...")
@@ -189,17 +197,18 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    # Use existing LLM server
+    # Use OpenAI for Generator, Spark vLLM for Shepherds
     python scripts/run_discovery.py --endpoint $GC_ENDPOINT \\
-        --llm-url http://192.168.1.100:8080/v1
+        --generator-llm openai --shepherd-llm-url http://spark:8000/v1
 
-    # Start LLM server first
+    # Use Argonne inference for Generator
     python scripts/run_discovery.py --endpoint $GC_ENDPOINT \\
-        --start-llm --model /home/user/models/llama-3.gguf
+        --generator-llm argonne --shepherd-llm-url http://spark:8000/v1
 
     # Quick test run
     python scripts/run_discovery.py --endpoint $GC_ENDPOINT \\
-        --llm-url http://spark:8080/v1 --max-iterations 1
+        --generator-llm openai --shepherd-llm-url http://spark:8000/v1 \\
+        --max-iterations 1
         """,
     )
 
@@ -210,28 +219,28 @@ Examples:
         help="Globus Compute endpoint ID for Spark",
     )
 
-    # LLM server options (mutually exclusive)
-    llm_group = parser.add_mutually_exclusive_group(required=True)
-    llm_group.add_argument(
-        "--llm-url",
-        help="URL to existing LLM server (e.g., http://spark:8080/v1)",
+    # Generator LLM options (runs on Mac)
+    parser.add_argument(
+        "--generator-llm",
+        choices=["openai", "argonne"],
+        default="openai",
+        help="LLM provider for GeneratorAgent (default: openai)",
     )
-    llm_group.add_argument(
-        "--start-llm",
-        action="store_true",
-        help="Start LLM server on Spark via GC",
+    parser.add_argument(
+        "--generator-model",
+        help="Model name for Generator (default: gpt-4o for openai, Meta-Llama-3.1-70B-Instruct for argonne)",
     )
 
-    # LLM server options (when starting)
+    # Shepherd LLM options (runs on Spark)
     parser.add_argument(
-        "--model",
-        help="Path to GGUF model file on Spark (required with --start-llm)",
+        "--shepherd-llm-url",
+        required=True,
+        help="URL to vLLM server on Spark for Shepherds (e.g., http://spark:8000/v1)",
     )
     parser.add_argument(
-        "--llm-port",
-        type=int,
-        default=8000,
-        help="LLM server port (default: 8000 for vLLM)",
+        "--shepherd-model",
+        default="meta-llama/Llama-3.1-8B-Instruct",
+        help="Model name for Shepherds on Spark",
     )
 
     # Generation options
@@ -282,54 +291,59 @@ Examples:
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
-    # Validate args
-    if args.start_llm and not args.model:
-        parser.error("--model is required when using --start-llm")
-
     # Load config
     config_path = Path(args.config)
     if not config_path.exists():
-        # Create default config
-        config = {
-            "generator": {
-                "llm": {
-                    "mode": "shared",
-                    "model": "gpt-3.5-turbo",
-                },
-                "generation": {
-                    "candidates_per_iteration": 6,
-                    "max_iterations": 20,
-                },
-                "convergence": {
-                    "patience": 3,
-                    "min_improvement": 0.01,
-                    "llm_judgment": True,
-                },
-                "shepherd": {
-                    "budget_per_candidate": 100.0,
-                    "num_concurrent": 4,
-                    "timeout": 3600,
-                },
-                "state": {
-                    "checkpoint_path": "data/generator_state.json",
-                    "results_path": "data/generator_results.jsonl",
-                },
-            },
-            "shepherd": {},
-            "globus_compute": {
-                "endpoint_id": args.endpoint,
-                "functions": {},
-            },
-        }
+        config = {}
         logging.warning(f"Config file {args.config} not found, using defaults")
     else:
         config = load_config(args.config)
 
-    # Apply command-line overrides
+    # Setup Generator LLM config based on --generator-llm
     gen_config = config.setdefault("generator", {})
-    generation = gen_config.setdefault("generation", {})
-    shepherd = gen_config.setdefault("shepherd", {})
+    gen_llm = gen_config.setdefault("llm", {})
 
+    if args.generator_llm == "openai":
+        gen_llm["base_url"] = "https://api.openai.com/v1"
+        gen_llm["model"] = args.generator_model or "gpt-4o"
+        gen_llm["api_key_env"] = "OPENAI_API_KEY"
+        # Verify API key is set
+        if not os.environ.get("OPENAI_API_KEY"):
+            logging.error("OPENAI_API_KEY environment variable not set")
+            sys.exit(1)
+    elif args.generator_llm == "argonne":
+        gen_llm["base_url"] = "https://inference-api.alcf.anl.gov/resource_server/sophia/vllm/v1"
+        gen_llm["model"] = args.generator_model or "meta-llama/Meta-Llama-3.1-70B-Instruct"
+        gen_llm["api_key_env"] = "ARGONNE_ACCESS_TOKEN"
+        # Verify API key is set
+        if not os.environ.get("ARGONNE_ACCESS_TOKEN"):
+            logging.warning("ARGONNE_ACCESS_TOKEN not set. Run: python scripts/argonne_auth.py")
+
+    # Setup other config sections
+    generation = gen_config.setdefault("generation", {
+        "candidates_per_iteration": 6,
+        "max_iterations": 20,
+    })
+    gen_config.setdefault("convergence", {
+        "patience": 3,
+        "min_improvement": 0.01,
+        "llm_judgment": True,
+    })
+    shepherd = gen_config.setdefault("shepherd", {
+        "budget_per_candidate": 100.0,
+        "num_concurrent": 4,
+        "timeout": 3600,
+    })
+    gen_config.setdefault("state", {
+        "checkpoint_path": "data/generator_state.json",
+        "results_path": "data/generator_results.jsonl",
+    })
+
+    # Shepherd config (passed to GC tasks)
+    shepherd_config = config.setdefault("shepherd", {})
+    shepherd_config["llm_model"] = args.shepherd_model
+
+    # Apply command-line overrides
     if args.max_iterations:
         generation["max_iterations"] = args.max_iterations
     if args.candidates_per_iteration:
@@ -339,41 +353,14 @@ Examples:
     if args.num_shepherds:
         shepherd["num_concurrent"] = args.num_shepherds
 
-    # Determine LLM URL
-    llm_url = args.llm_url
-
-    if args.start_llm:
-        logging.info("Starting LLM server on Spark...")
-        server_result = start_llm_server_on_spark(
-            endpoint=args.endpoint,
-            model_path=args.model,
-            port=args.llm_port,
-            run_duration=0,  # Just test, will run separately
-        )
-
-        if not server_result.get("ok"):
-            logging.error(f"Failed to start LLM server: {server_result.get('error')}")
-            sys.exit(1)
-
-        # Server started successfully - construct URL
-        # Note: We need the actual IP/hostname of Spark
-        llm_url = server_result.get("server_url", f"http://localhost:{args.llm_port}/v1")
-        logging.info(f"LLM server started: {llm_url}")
-
-        # User needs to ensure server keeps running
-        logging.warning(
-            "Note: LLM server was tested but may have stopped. "
-            "For persistent server, use start_llm_server.py with --run-duration"
-        )
-
-    # Check LLM server is reachable
-    logging.info(f"Checking LLM server at {llm_url}...")
-    if check_llm_server(llm_url):
-        logging.info("LLM server is responding")
+    # Check Shepherd LLM server is reachable
+    logging.info(f"Checking Shepherd LLM server at {args.shepherd_llm_url}...")
+    if check_llm_server(args.shepherd_llm_url):
+        logging.info("Shepherd LLM server is responding")
     else:
         logging.warning(
-            f"Could not reach LLM server at {llm_url}. "
-            "Discovery may fail if server is not running."
+            f"Could not reach Shepherd LLM server at {args.shepherd_llm_url}. "
+            "Discovery may fail if server is not running on Spark."
         )
 
     # Get GC function map from config
@@ -388,8 +375,9 @@ Examples:
     logging.info("=" * 60)
     logging.info("Starting Catalyst Discovery")
     logging.info("=" * 60)
-    logging.info(f"Endpoint: {args.endpoint}")
-    logging.info(f"LLM URL: {llm_url}")
+    logging.info(f"Generator LLM: {args.generator_llm} ({gen_llm.get('model')})")
+    logging.info(f"Shepherd LLM: {args.shepherd_llm_url} ({args.shepherd_model})")
+    logging.info(f"GC Endpoint: {args.endpoint}")
     logging.info(f"Max iterations: {generation.get('max_iterations', 20)}")
     logging.info(f"Candidates/iteration: {generation.get('candidates_per_iteration', 6)}")
     logging.info(f"Budget/candidate: {shepherd.get('budget_per_candidate', 100.0)}")
@@ -403,7 +391,7 @@ Examples:
             run_discovery(
                 config=config,
                 gc_endpoint=args.endpoint,
-                llm_url=llm_url,
+                shepherd_llm_url=args.shepherd_llm_url,
                 gc_function_map=gc_function_map,
             )
         )

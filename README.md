@@ -68,7 +68,7 @@ Mac (local)                              Spark (remote)
 - Python 3.12+
 - Redis (for agent coordination)
 - Docker (for vLLM on GPU systems)
-- Globus Compute credentials
+- OpenAI API key or Argonne credentials
 
 ### Installation
 
@@ -76,55 +76,59 @@ Mac (local)                              Spark (remote)
 pip install -e .
 ```
 
-### Running on Mac (Local)
+### Two-Script Workflow (Recommended)
 
-1. **Start Redis** (if not running):
-   ```bash
-   brew services start redis
-   ```
+**Step 1: Start agents on Spark**
 
-2. **Run discovery** (connects to remote Spark):
-   ```bash
-   python scripts/run_discovery.py \
-       --endpoint $GC_ENDPOINT \
-       --llm-url http://<spark-ip>:8000/v1
-   ```
+```bash
+# SSH to Spark, then:
+# Start vLLM server
+python scripts/start_vllm_server.py --model meta-llama/Llama-3.1-8B-Instruct
 
-### Running on Spark (Remote)
+# Start all agents (connects to Redis for coordination)
+python scripts/run_spark_agents.py \
+    --llm-url http://localhost:8000/v1 \
+    --redis-host localhost \
+    --device cuda
+```
 
-1. **Start vLLM server**:
-   ```bash
-   python scripts/start_vllm_server.py --model meta-llama/Llama-3.1-8B-Instruct
-   ```
+**Step 2: Run discovery from Mac**
 
-2. **Start Academy agents**:
-   ```bash
-   python scripts/run_spark_agents.py \
-       --llm-url http://localhost:8000/v1 \
-       --redis-host localhost \
-       --redis-port 6379
-   ```
+```bash
+# Set your API key
+export OPENAI_API_KEY="sk-..."
 
-   With GPU:
-   ```bash
-   python scripts/run_spark_agents.py \
-       --llm-url http://localhost:8000/v1 \
-       --device cuda
-   ```
+# Run Generator (connects to same Redis as Spark agents)
+python scripts/run_generator.py \
+    --redis-host localhost \
+    --generator-llm openai
+```
+
+The Generator uses OpenAI/Argonne for reasoning, while Shepherds on Spark use the local vLLM.
+
+### Alternative: Globus Compute Mode
+
+If you can't use Redis between Mac and Spark, use GC-based evaluation:
+
+```bash
+python scripts/run_discovery.py \
+    --endpoint $GC_ENDPOINT \
+    --generator-llm openai \
+    --shepherd-llm-url http://spark:8000/v1
+```
 
 ### Using Argonne Inference API
 
-Instead of running a local vLLM server:
+For the Generator (instead of OpenAI):
 
 ```bash
 # Get authentication token
 python scripts/argonne_auth.py
 
-# Run with Argonne's hosted LLM
-python scripts/run_spark_agents.py \
-    --llm-url https://inference-api.alcf.anl.gov/resource_server/sophia/vllm/v1 \
-    --llm-model meta-llama/Meta-Llama-3.1-70B-Instruct \
-    --redis-host localhost
+# Run with Argonne
+python scripts/run_generator.py \
+    --redis-host localhost \
+    --generator-llm argonne
 ```
 
 ## Configuration
@@ -165,7 +169,8 @@ academy:
 | Script | Purpose |
 |--------|---------|
 | `run_spark_agents.py` | Launch all Academy agents on Spark |
-| `run_discovery.py` | Full discovery pipeline orchestration |
+| `run_generator.py` | Run GeneratorAgent on Mac (connects to Spark via Redis) |
+| `run_discovery.py` | Discovery via Globus Compute (alternative to Academy) |
 | `start_vllm_server.py` | Start vLLM in Docker container |
 | `argonne_auth.py` | Get Globus/Argonne auth token |
 | `register_gc_functions.py` | Register functions with Globus Compute |

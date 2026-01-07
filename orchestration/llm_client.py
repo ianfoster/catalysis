@@ -191,11 +191,12 @@ def _extract_json(text: str) -> dict[str, Any]:
 
 
 def create_llm_client_from_config(config: dict[str, Any]) -> LLMClient:
-    """Create LLMClient from shepherd config section.
+    """Create LLMClient from config section.
 
     Args:
         config: Config dict with 'llm' section containing:
-            - mode: "shared" or "local"
+            - base_url: Direct URL (preferred, overrides mode-based selection)
+            - mode: "shared" or "local" (fallback if base_url not set)
             - model: model name
             - shared_url: URL for shared mode
             - local_url: URL for local mode
@@ -207,13 +208,16 @@ def create_llm_client_from_config(config: dict[str, Any]) -> LLMClient:
     import os
 
     llm_config = config.get("llm", {})
-    mode = llm_config.get("mode", "shared")
     model = llm_config.get("model", "meta-llama/Llama-3-8B-Instruct")
 
-    if mode == "shared":
-        base_url = llm_config.get("shared_url", "http://localhost:8000/v1")
-    else:
-        base_url = llm_config.get("local_url", "http://localhost:8000/v1")
+    # Prefer direct base_url, otherwise use mode-based selection
+    base_url = llm_config.get("base_url")
+    if not base_url:
+        mode = llm_config.get("mode", "shared")
+        if mode == "shared":
+            base_url = llm_config.get("shared_url", "http://localhost:8000/v1")
+        else:
+            base_url = llm_config.get("local_url", "http://localhost:8000/v1")
 
     api_key = None
     api_key_env = llm_config.get("api_key_env")
@@ -228,6 +232,8 @@ def create_llm_client_from_config(config: dict[str, Any]) -> LLMClient:
             api_key = os.environ.get("ANTHROPIC_API_KEY")
         elif "together" in base_url:
             api_key = os.environ.get("TOGETHER_API_KEY")
+        elif "alcf.anl.gov" in base_url:
+            api_key = os.environ.get("ARGONNE_ACCESS_TOKEN")
 
     timeout = config.get("timeouts", {}).get("llm_call", 30.0)
 

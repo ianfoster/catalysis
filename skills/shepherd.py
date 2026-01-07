@@ -171,17 +171,24 @@ class ShepherdAgent(TrackedAgent):
                 api_key="not-needed",  # vLLM doesn't require auth
             )
 
-            # Test connection
+            # Test connection and auto-detect model
             try:
                 models = await self._remote_llm_client.models.list()
                 available = [m.id for m in models.data]
                 logger.info("Remote vLLM connected. Available models: %s", available)
+
                 if self._llm_model not in available:
-                    logger.warning(
-                        "Requested model %s not in available models %s",
-                        self._llm_model,
-                        available,
-                    )
+                    if available:
+                        old_model = self._llm_model
+                        self._llm_model = available[0]
+                        logger.warning(
+                            "Model %s not available. Auto-selected: %s",
+                            old_model, self._llm_model,
+                        )
+                    else:
+                        raise RuntimeError("No models available on vLLM server")
+                else:
+                    logger.info("Using model: %s", self._llm_model)
             except Exception as e:
                 logger.error("Failed to connect to remote vLLM: %s", e)
                 raise
@@ -950,13 +957,17 @@ class ShepherdAgent(TrackedAgent):
             assessment = await self._reason_json(prompt)
             return assessment
         except Exception as e:
-            logger.error("Final assessment generation failed: %s", e)
+            error_msg = str(e)
+            logger.error("Final assessment generation failed: %s", error_msg)
+
+            # Return error with score=0 so it's clearly a failure, not a mediocre result
             return {
-                "viability_score": 50,
-                "strengths": ["Tests completed successfully"],
-                "concerns": [f"Assessment generation failed: {e}"],
-                "recommendation": "DEPRIORITIZE",
-                "summary": "Assessment generation failed; manual review required.",
+                "viability_score": 0,
+                "strengths": [],
+                "concerns": [f"ASSESSMENT FAILED: {error_msg}"],
+                "recommendation": "ERROR",
+                "summary": f"Assessment failed: {error_msg}",
+                "error": error_msg,
             }
 
     @action

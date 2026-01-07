@@ -197,98 +197,9 @@ class GeneratorAgent(TrackedAgent):
             except Exception:
                 pass
 
-    @loop
-    async def main_loop(self, shutdown: asyncio.Event) -> None:
-        """Main generation loop - runs until convergence or shutdown."""
-        self._running = True
-        gen_config = self._config.get("generation", {})
-        conv_config = self._config.get("convergence", {})
-
-        max_iterations = gen_config.get("max_iterations", 20)
-        candidates_per_iter = gen_config.get("candidates_per_iteration", 6)
-        patience = conv_config.get("patience", 3)
-        min_improvement = conv_config.get("min_improvement", 0.01)
-        use_llm_judgment = conv_config.get("llm_judgment", True)
-
-        logger.info(
-            "Starting generation loop: max_iter=%d, candidates/iter=%d",
-            max_iterations,
-            candidates_per_iter,
-        )
-
-        # Reset narrative log for fresh run (with Redis pub/sub for distributed visibility)
-        narrative = reset_narrative(
-            redis_host=self._redis_host,
-            redis_port=self._redis_port,
-        )
-
-        while not shutdown.is_set() and self._running:
-            iteration = self._state.iteration
-
-            # Check iteration limit
-            if iteration >= max_iterations:
-                self._state.converged = True
-                self._state.stop_reason = f"Reached max iterations ({max_iterations})"
-                logger.info("Stopping: %s", self._state.stop_reason)
-                narrative.generator_converged(self._state.stop_reason, len(self._state.candidates_evaluated), self._state.best_score)
-                break
-
-            logger.info("=== Generation iteration %d ===", iteration + 1)
-            narrative.generator_start(iteration + 1, max_iterations, candidates_per_iter)
-
-            # Step 1: Propose candidates via LLM
-            narrative.generator_proposing(self._state.get_top_performers(5))
-            candidates = await self._propose_candidates(candidates_per_iter)
-            if not candidates:
-                logger.warning("No valid candidates proposed, retrying...")
-                await asyncio.sleep(1)
-                continue
-
-            logger.info("Proposed %d candidates", len(candidates))
-
-            # Step 2: Evaluate candidates via ShepherdAgents
-            results = await self._evaluate_candidates(candidates)
-
-            # Step 3: Update state
-            self._state.update_with_results(results)
-
-            # Step 4: Save checkpoint
-            state_config = self._config.get("state", {})
-            checkpoint_path = state_config.get("checkpoint_path", "data/generator_state.json")
-            self._state.save_checkpoint(checkpoint_path)
-
-            # Append to results log
-            results_path = state_config.get("results_path", "data/generator_results.jsonl")
-            self._append_results(results_path, results)
-
-            # Step 5: Check convergence
-            if self._state.check_convergence(patience, min_improvement):
-                logger.info("Stopping: %s", self._state.stop_reason)
-                break
-
-            # Step 6: Optional LLM convergence judgment
-            if use_llm_judgment and iteration >= patience:
-                should_stop = await self._check_llm_convergence()
-                if should_stop:
-                    logger.info("Stopping: LLM recommends stopping")
-                    break
-
-            logger.info(
-                "Iteration %d complete: best_score=%.1f, total_evaluated=%d",
-                iteration + 1,
-                self._state.best_score,
-                len(self._state.candidates_evaluated),
-            )
-            narrative.generator_iteration_done(iteration + 1, results)
-
-        # Final summary
-        logger.info("Generation complete: %s", json.dumps(self._state.get_summary(), indent=2))
-        narrative.generator_converged(
-            self._state.stop_reason or "Complete",
-            len(self._state.candidates_evaluated),
-            self._state.best_score,
-        )
-        self.agent_shutdown()
+    # Note: We use the run_discovery @action instead of a @loop since we want
+    # explicit control over when the discovery runs. The caller invokes run_discovery()
+    # to start the loop rather than having it start automatically on agent launch.
 
     async def _propose_candidates(self, n: int) -> list[dict[str, Any]]:
         """Propose new candidates via LLM.
@@ -308,7 +219,6 @@ class GeneratorAgent(TrackedAgent):
             top_performers=self._state.get_top_performers(10),
             seen_candidates=self._state.seen_strings,
         )
-
         try:
             response = await self._llm.reason_json(prompt, SYSTEM_PROMPT)
         except Exception as e:
@@ -358,9 +268,15 @@ class GeneratorAgent(TrackedAgent):
         num_concurrent = shepherd_config.get("num_concurrent", 4)
         timeout = shepherd_config.get("timeout", 3600)
 
-        # Try Academy-based evaluation first (if running as Academy agent)
-        if ACADEMY_AVAILABLE and hasattr(self, 'agent_launch_alongside'):
-            return await self._evaluate_via_academy(candidates, budget, timeout)
+        # Try Academy-based evaluation first (if actually running in Academy context)
+        # Check for agent_exchange_client property which only works in Academy runtime
+        try:
+            if ACADEMY_AVAILABLE and hasattr(self, 'agent_exchange_client'):
+                # Verify we're actually in Academy context by accessing the exchange
+                _ = self.agent_exchange_client
+                return await self._evaluate_via_academy(candidates, budget, timeout)
+        except Exception as e:
+            logger.info("Not running in Academy context (%s), using GC fallback", e)
 
         # Fall back to GC-based evaluation
         if not self._gc_executor or not self._shepherd_func_id:
@@ -373,11 +289,16 @@ class GeneratorAgent(TrackedAgent):
         )
 
         # Submit all candidates as GC tasks
+        # Get shepherd LLM URL from shepherd_config (set by run_discovery.py)
+        shepherd_llm_url = self._shepherd_config.get("llm_url", "http://localhost:8000/v1")
+        shepherd_llm_model = self._shepherd_config.get("llm_model", "gpt-3.5-turbo")
+
         futures = []
         for candidate in candidates:
             config = {
                 "candidate": candidate,
-                "llm_url": self._llm_url or "http://localhost:8000/v1",
+                "llm_url": shepherd_llm_url,
+                "llm_model": shepherd_llm_model,
                 "budget": budget,
                 "gc_functions": self._gc_function_map,
                 "gc_endpoint": self._gc_endpoint,  # For nested simulation calls
@@ -617,6 +538,129 @@ class GeneratorAgent(TrackedAgent):
         self._state.stop_reason = reason
         logger.info("Stop requested: %s", reason)
         return {"acknowledged": True, "reason": reason}
+
+    @action
+    async def run_discovery(self, req: dict) -> dict:
+        """Run the full discovery loop (Academy action).
+
+        This action runs the generation loop within Academy context,
+        discovering and using ShepherdAgents via the exchange.
+
+        Args:
+            req: Optional overrides:
+                - max_iterations: Override max iterations
+                - candidates_per_iteration: Override candidates per iteration
+
+        Returns:
+            Final state summary dict with best candidates
+        """
+        # Apply any overrides from request
+        if "max_iterations" in req:
+            self._config.setdefault("generation", {})["max_iterations"] = req["max_iterations"]
+        if "candidates_per_iteration" in req:
+            self._config.setdefault("generation", {})["candidates_per_iteration"] = req["candidates_per_iteration"]
+
+        # Initialize if needed
+        if self._llm is None:
+            self._initialize()
+
+        self._running = True
+        gen_config = self._config.get("generation", {})
+        conv_config = self._config.get("convergence", {})
+
+        max_iterations = gen_config.get("max_iterations", 20)
+        candidates_per_iter = gen_config.get("candidates_per_iteration", 6)
+        patience = conv_config.get("patience", 3)
+        min_improvement = conv_config.get("min_improvement", 0.01)
+        use_llm_judgment = conv_config.get("llm_judgment", True)
+
+        logger.info(
+            "Starting Academy discovery: max_iter=%d, candidates/iter=%d",
+            max_iterations,
+            candidates_per_iter,
+        )
+
+        # Reset narrative for fresh run
+        narrative = reset_narrative(
+            redis_host=self._redis_host,
+            redis_port=self._redis_port,
+        )
+
+        while self._running:
+            iteration = self._state.iteration
+
+            # Check iteration limit
+            if iteration >= max_iterations:
+                self._state.converged = True
+                self._state.stop_reason = f"Reached max iterations ({max_iterations})"
+                logger.info("Stopping: %s", self._state.stop_reason)
+                narrative.generator_converged(
+                    self._state.stop_reason,
+                    len(self._state.candidates_evaluated),
+                    self._state.best_score,
+                )
+                break
+
+            logger.info("=== Generation iteration %d ===", iteration + 1)
+            narrative.generator_start(iteration + 1, max_iterations, candidates_per_iter)
+
+            # Step 1: Propose candidates via LLM
+            narrative.generator_proposing(self._state.get_top_performers(5))
+            candidates = await self._propose_candidates(candidates_per_iter)
+            if not candidates:
+                logger.warning("No valid candidates proposed, retrying...")
+                await asyncio.sleep(1)
+                continue
+
+            logger.info("Proposed %d candidates", len(candidates))
+
+            # Step 2: Evaluate candidates via ShepherdAgents (Academy or GC)
+            results = await self._evaluate_candidates(candidates)
+
+            # Step 3: Update state
+            self._state.update_with_results(results)
+
+            # Step 4: Save checkpoint
+            state_config = self._config.get("state", {})
+            checkpoint_path = state_config.get("checkpoint_path", "data/generator_state.json")
+            self._state.save_checkpoint(checkpoint_path)
+
+            # Append to results log
+            results_path = state_config.get("results_path", "data/generator_results.jsonl")
+            self._append_results(results_path, results)
+
+            # Step 5: Check convergence
+            if self._state.check_convergence(patience, min_improvement):
+                logger.info("Stopping: %s", self._state.stop_reason)
+                narrative.generator_converged(
+                    self._state.stop_reason,
+                    len(self._state.candidates_evaluated),
+                    self._state.best_score,
+                )
+                break
+
+            # Step 6: Optional LLM convergence judgment
+            if use_llm_judgment and iteration >= patience:
+                should_stop = await self._check_llm_convergence()
+                if should_stop:
+                    self._state.stop_reason = "LLM recommends stopping"
+                    logger.info("Stopping: %s", self._state.stop_reason)
+                    narrative.generator_converged(
+                        self._state.stop_reason,
+                        len(self._state.candidates_evaluated),
+                        self._state.best_score,
+                    )
+                    break
+
+            logger.info(
+                "Iteration %d complete: best_score=%.1f, total_evaluated=%d",
+                iteration + 1,
+                self._state.best_score,
+                len(self._state.candidates_evaluated),
+            )
+            narrative.generator_iteration_done(iteration + 1, results)
+
+        return self._state.get_summary()
 
     async def run(self) -> dict[str, Any]:
         """Run the generation loop (simple API without Academy).

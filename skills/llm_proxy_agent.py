@@ -65,13 +65,26 @@ class LLMProxyAgent(TrackedAgent):
             api_key="not-needed",
         )
 
-        # Test connection
+        # Test connection and auto-detect model if needed
         try:
             models = await self._client.models.list()
             available = [m.id for m in models.data]
             logger.info("Connected to vLLM. Available models: %s", available)
+
             if self._model not in available:
-                logger.warning("Model %s not in available models", self._model)
+                if available:
+                    # Auto-select the first available model
+                    old_model = self._model
+                    self._model = available[0]
+                    logger.warning(
+                        "Model %s not available. Auto-selected: %s",
+                        old_model, self._model
+                    )
+                else:
+                    logger.error("No models available on vLLM server!")
+                    raise RuntimeError("No models available on vLLM server")
+            else:
+                logger.info("Using model: %s", self._model)
         except Exception as e:
             logger.error("Failed to connect to vLLM: %s", e)
             raise
