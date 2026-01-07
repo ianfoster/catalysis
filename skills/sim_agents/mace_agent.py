@@ -88,8 +88,13 @@ class MACEAgent(TrackedAgent):
             import numpy as np
 
             # Run CPU-intensive ML calculations in thread pool to not block event loop
-            energy = await asyncio.to_thread(slab.get_potential_energy)
-            forces = await asyncio.to_thread(slab.get_forces)
+            # IMPORTANT: Compute both in same thread to ensure calculator cache works
+            def compute_energy_and_forces():
+                energy = slab.get_potential_energy()
+                forces = slab.get_forces()
+                return energy, forces
+
+            energy, forces = await asyncio.to_thread(compute_energy_and_forces)
 
             # Convert numpy types to native Python for JSON serialization
             energy = float(energy)
