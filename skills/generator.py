@@ -268,15 +268,10 @@ class GeneratorAgent(TrackedAgent):
         num_concurrent = shepherd_config.get("num_concurrent", 4)
         timeout = shepherd_config.get("timeout", 3600)
 
-        # Try Academy-based evaluation first (if actually running in Academy context)
-        # Check for agent_exchange_client property which only works in Academy runtime
-        try:
-            if ACADEMY_AVAILABLE and hasattr(self, 'agent_exchange_client'):
-                # Verify we're actually in Academy context by accessing the exchange
-                _ = self.agent_exchange_client
-                return await self._evaluate_via_academy(candidates, budget, timeout)
-        except Exception as e:
-            logger.info("Not running in Academy context (%s), using GC fallback", e)
+        # Try Academy-based evaluation first (if we have Redis connection info)
+        if ACADEMY_AVAILABLE and self._redis_host:
+            logger.info("Using Academy/Redis for evaluation")
+            return await self._evaluate_via_academy(candidates, budget, timeout)
 
         # Fall back to GC-based evaluation
         if not self._gc_executor or not self._shepherd_func_id:
@@ -354,9 +349,38 @@ class GeneratorAgent(TrackedAgent):
 
         logger.info("Evaluating %d candidates via Academy agents", len(candidates))
 
-        # Discover ShepherdAgents on the exchange
-        exchange = self.agent_exchange_client
-        shepherd_ids = await exchange.discover(ShepherdAgent)
+        # Try to discover ShepherdAgents via exchange
+        shepherd_ids = []
+        try:
+            exchange = self.agent_exchange_client
+            shepherd_ids = await exchange.discover(ShepherdAgent)
+        except Exception as e:
+            logger.warning("Exchange discover failed: %s, trying Redis direct", e)
+
+        # Fallback: Query Redis directly for ShepherdAgent registrations
+        if not shepherd_ids and self._redis_host:
+            try:
+                import redis
+                r = redis.Redis(host=self._redis_host, port=self._redis_port)
+
+                # Agent types are stored in agent:* keys as comma-separated class names
+                # Active status is in active:* keys with value "ACTIVE"
+                for key in r.keys("agent:*"):
+                    try:
+                        agent_id = key.decode().replace("agent:", "")
+                        # Check if this agent is active
+                        status = r.get(f"active:{agent_id}")
+                        if status != b"ACTIVE":
+                            continue
+                        # Check if it's a ShepherdAgent
+                        type_data = r.get(key)
+                        if type_data and b"ShepherdAgent" in type_data:
+                            shepherd_ids.append(agent_id)
+                    except Exception:
+                        pass
+                logger.info("Found %d active ShepherdAgents via Redis", len(shepherd_ids))
+            except Exception as e:
+                logger.error("Redis direct query failed: %s", e)
 
         if not shepherd_ids:
             logger.error("No ShepherdAgents found on exchange! Start run_spark_agents.py on Spark.")

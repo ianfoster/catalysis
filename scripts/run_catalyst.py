@@ -30,6 +30,96 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 
+def check_agents_on_spark(endpoint: str) -> dict:
+    """Check status of agents on Spark via Globus Compute."""
+    from globus_compute_sdk import Client, Executor
+
+    def check_agents_gc(cfg: dict) -> dict:
+        """Check Academy agents status on Spark."""
+        import subprocess
+        import urllib.request
+
+        result = {"ok": False}
+
+        # Check vLLM
+        try:
+            resp = urllib.request.urlopen("http://localhost:8000/v1/models", timeout=5)
+            import json
+            data = json.loads(resp.read())
+            models = [m["id"] for m in data.get("data", [])]
+            result["vllm"] = {"running": True, "models": models}
+        except Exception as e:
+            result["vllm"] = {"running": False, "error": str(e)}
+
+        # Check Redis and agent registrations
+        try:
+            import redis
+            r = redis.Redis(host="localhost", port=6379)
+            r.ping()
+            result["redis"] = {"running": True}
+
+            # Count active agents
+            active_keys = r.keys("active:*")
+            active_count = sum(1 for k in active_keys if r.get(k) == b"ACTIVE")
+
+            # Look for agent type info in other keys
+            agent_types = {}
+            sample_keys = []
+
+            # Check different possible key patterns for agent metadata
+            for pattern in ["agent:*", "agents:*", "type:*", "meta:*", "registry:*"]:
+                keys = r.keys(pattern)
+                if keys:
+                    sample_keys.append(f"{pattern}: {len(keys)} keys")
+                    for key in keys[:3]:
+                        data = r.get(key)
+                        if data:
+                            sample_keys.append(f"  {key.decode()}: {data.decode()[:80] if len(data) < 100 else 'binary'}")
+
+            # Also check what key patterns exist
+            all_keys = r.keys("*")
+            key_prefixes = {}
+            for k in all_keys:
+                prefix = k.decode().split(":")[0] if b":" in k else k.decode()
+                key_prefixes[prefix] = key_prefixes.get(prefix, 0) + 1
+
+            result["agents"] = {
+                "count": len(active_keys),
+                "active": active_count,
+                "key_prefixes": dict(sorted(key_prefixes.items(), key=lambda x: -x[1])[:10]),
+            }
+            result["sample_keys"] = sample_keys[:10]
+        except Exception as e:
+            result["redis"] = {"running": False, "error": str(e)}
+            result["agents"] = {"count": 0}
+
+        # Check if run_spark_agents.py is running
+        try:
+            proc = subprocess.run(
+                ["pgrep", "-f", "run_spark_agents.py"],
+                capture_output=True,
+                text=True,
+            )
+            pids = proc.stdout.strip().split("\n") if proc.stdout.strip() else []
+            result["agent_process"] = {"running": len(pids) > 0, "pids": pids}
+        except Exception as e:
+            result["agent_process"] = {"error": str(e)}
+
+        result["ok"] = True
+        return result
+
+    logging.info("Checking agents on Spark via GC...")
+
+    client = Client()
+    func_id = client.register_function(check_agents_gc)
+
+    with Executor(endpoint_id=endpoint) as ex:
+        future = ex.submit_to_registered_function(func_id, args=({},))
+        result = future.result(timeout=60)
+
+    return result
+
+
 def stop_agents_on_spark(endpoint: str) -> dict:
     """Stop running agents on Spark via Globus Compute."""
     from globus_compute_sdk import Client, Executor
@@ -404,9 +494,11 @@ Examples:
     parser.add_argument("--redis-port", type=int, default=6380, help="Local Redis port (tunnel target, default: 6380)")
 
     # Agent management
+    parser.add_argument("--check-agents", action="store_true", help="Check agent status on Spark and exit")
     parser.add_argument("--stop-agents", action="store_true", help="Stop agents on Spark and exit")
     parser.add_argument("--update-code", action="store_true", help="Update code on Spark via git pull")
     parser.add_argument("--restart-agents", action="store_true", help="Stop agents, update code, restart agents")
+    parser.add_argument("--start-agents-only", action="store_true", help="Start agents on Spark and exit (no generator)")
 
     # Skip options
     parser.add_argument("--skip-agents", action="store_true", help="Skip starting agents (already running)")
@@ -437,15 +529,41 @@ Examples:
 
     # Validate args
     needs_endpoint = (
-        args.stop_agents or args.update_code or args.restart_agents or
-        not args.skip_agents
+        args.check_agents or args.stop_agents or args.update_code or
+        args.restart_agents or args.start_agents_only or not args.skip_agents
     )
     if needs_endpoint and not args.endpoint:
         parser.error("--endpoint required for agent management")
-    if not args.skip_tunnel and not args.spark_host and not (args.stop_agents or args.update_code):
+    if not args.skip_tunnel and not args.spark_host and not (args.check_agents or args.stop_agents or args.update_code or args.start_agents_only):
         parser.error("--spark-host required unless --skip-tunnel")
 
     # Handle agent management commands (these exit early)
+    if args.check_agents:
+        result = check_agents_on_spark(args.endpoint)
+        print("\n" + "=" * 60)
+        print("Agent Status on Spark")
+        print("=" * 60)
+        vllm = result.get("vllm", {})
+        print(f"vLLM: {'running' if vllm.get('running') else 'NOT running'}")
+        if vllm.get("models"):
+            print(f"  Models: {', '.join(vllm['models'])}")
+        redis_info = result.get("redis", {})
+        print(f"Redis: {'running' if redis_info.get('running') else 'NOT running'}")
+        agents = result.get("agents", {})
+        print(f"Registered agents: {agents.get('count', 0)} ({agents.get('active', 0)} active)")
+        if agents.get("key_prefixes"):
+            print("Redis key patterns:")
+            for prefix, count in agents["key_prefixes"].items():
+                print(f"  - {prefix}: {count}")
+        if result.get("sample_keys"):
+            print("Sample keys:")
+            for s in result["sample_keys"]:
+                print(f"  {s}")
+        proc = result.get("agent_process", {})
+        print(f"Agent process: {'running' if proc.get('running') else 'NOT running'}")
+        print("=" * 60)
+        sys.exit(0)
+
     if args.stop_agents:
         result = stop_agents_on_spark(args.endpoint)
         logging.info(f"Stop agents result: {result}")
@@ -511,6 +629,10 @@ Examples:
                 sys.exit(1)
 
             logging.info(f"Agents status: vLLM={result.get('vllm')}, agents={result.get('agents')}, count={result.get('agent_count')}")
+
+            if args.start_agents_only:
+                logging.info("Agents started. Exiting (--start-agents-only).")
+                sys.exit(0)
 
         # Step 2: Setup SSH tunnel
         if not args.skip_tunnel:
