@@ -617,6 +617,7 @@ Examples:
     parser.add_argument("--restart-agents", action="store_true", help="Stop agents, update code, restart agents")
     parser.add_argument("--start-agents-only", action="store_true", help="Start agents on Spark and exit (no generator)")
     parser.add_argument("--clear-cache", action="store_true", help="Clear local caches and Spark Redis caches")
+    parser.add_argument("--logs", action="store_true", help="Show agent logs from Spark")
 
     # Skip options
     parser.add_argument("--skip-agents", action="store_true", help="Skip starting agents (already running)")
@@ -648,11 +649,12 @@ Examples:
     # Validate args
     needs_endpoint = (
         args.check_agents or args.stop_agents or args.update_code or
-        args.restart_agents or args.start_agents_only or not args.skip_agents
+        args.restart_agents or args.start_agents_only or args.logs or
+        not args.skip_agents
     )
     if needs_endpoint and not args.endpoint:
         parser.error("--endpoint required for agent management")
-    if not args.skip_tunnel and not args.spark_host and not (args.check_agents or args.stop_agents or args.update_code or args.start_agents_only):
+    if not args.skip_tunnel and not args.spark_host and not (args.check_agents or args.stop_agents or args.update_code or args.start_agents_only or args.logs or args.clear_cache):
         parser.error("--spark-host required unless --skip-tunnel")
 
     # Handle agent management commands (these exit early)
@@ -675,6 +677,30 @@ Examples:
         proc = result.get("agent_process", {})
         print(f"Agent process: {'running' if proc.get('running') else 'NOT running'}")
         print("=" * 60)
+        sys.exit(0)
+
+    if args.logs:
+        from globus_compute_sdk import Client, Executor
+
+        def get_logs_gc(cfg: dict) -> dict:
+            try:
+                with open("/tmp/spark_agents.log") as f:
+                    # Get last 200 lines
+                    lines = f.readlines()
+                    return {"ok": True, "log": "".join(lines[-200:])}
+            except Exception as e:
+                return {"ok": False, "error": str(e)}
+
+        client = Client()
+        func_id = client.register_function(get_logs_gc)
+        with Executor(endpoint_id=args.endpoint) as ex:
+            future = ex.submit_to_registered_function(func_id, args=({},))
+            result = future.result(timeout=60)
+
+        if result.get("ok"):
+            print(result["log"])
+        else:
+            print(f"Error: {result.get('error')}")
         sys.exit(0)
 
     if args.clear_cache:
