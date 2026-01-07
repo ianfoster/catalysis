@@ -91,15 +91,18 @@ class MACEAgent(TrackedAgent):
             energy = await asyncio.to_thread(slab.get_potential_energy)
             forces = await asyncio.to_thread(slab.get_forces)
 
+            # Convert numpy types to native Python for JSON serialization
+            energy = float(energy)
+            n_atoms = len(slab)
             result = {
                 "ok": True,
                 "method": "mace",
                 "total_energy_eV": round(energy, 6),
-                "energy_per_atom_eV": round(energy / len(slab), 6),
+                "energy_per_atom_eV": round(energy / n_atoms, 6),
                 "max_force_eV_A": round(float(np.max(np.abs(forces))), 6),
-                "n_atoms": len(slab),
-                "E_ads_CO2_est": round(-0.3 - energy / len(slab) / 10, 4),
-                "E_ads_H_est": round(-0.25 - energy / len(slab) / 15, 4),
+                "n_atoms": n_atoms,
+                "E_ads_CO2_est": round(-0.3 - energy / n_atoms / 10, 4),
+                "E_ads_H_est": round(-0.25 - energy / n_atoms / 15, 4),
             }
             tracker.set_result(result)
             return result
