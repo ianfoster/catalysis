@@ -372,6 +372,13 @@ class ShepherdAgent(TrackedAgent):
             if t.cost <= (budget_total - budget_spent)
         ]
 
+        # Log classification for debugging
+        if slow_tests:
+            logger.info("%s Slow tests: %s", self._tag, [t.name for t in slow_tests])
+        else:
+            fast_tests = self._runtime_tracker.get_fast_tests(threshold_s=FAST_TEST_THRESHOLD_S)
+            logger.info("%s All tests classified as fast: %s", self._tag, [t.name for t in fast_tests])
+
         if affordable_slow and budget_spent < budget_total:
             # Get names of slow tests to show in prompt (exclude fast tests)
             slow_test_names = {t.name for t in slow_tests}
