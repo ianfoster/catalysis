@@ -140,13 +140,22 @@ class MACEAgent(TrackedAgent):
             max_steps = request.get("max_steps", 100)
 
             slab = self._build_slab(candidate)
+
+            # Ensure calculator is set
+            if self._calc is None:
+                result = {"ok": False, "error": "MACE calculator is None"}
+                tracker.set_result(result)
+                return result
+
             slab.calc = self._calc
 
             # Run CPU-intensive relaxation in thread pool
             def do_relaxation():
+                # Get initial energy (triggers calculation)
                 e_init = float(slab.get_potential_energy())
                 opt = BFGS(slab, logfile=None)
                 conv = opt.run(fmax=fmax, steps=max_steps)
+                # After relaxation, get final energy and forces
                 e_fin = float(slab.get_potential_energy())
                 f = slab.get_forces()
                 return e_init, conv, e_fin, f, opt.nsteps
