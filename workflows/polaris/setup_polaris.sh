@@ -26,30 +26,30 @@ echo "Conda dir: ${CONDA_DIR}"
 echo ""
 
 # Step 1: Configure conda to use Eagle (avoid home quota issues)
-echo "[1/7] Configuring conda to use Eagle filesystem..."
-mkdir -p ${CONDA_DIR}/pkgs
-mkdir -p ${CONDA_DIR}/envs
+#echo "[1/7] Configuring conda to use Eagle filesystem..."
+#mkdir -p ${CONDA_DIR}/pkgs
+#mkdir -p ${CONDA_DIR}/envs
 
-module load conda
+#module load conda
 
-conda config --add pkgs_dirs ${CONDA_DIR}/pkgs
-conda config --add envs_dirs ${CONDA_DIR}/envs
+#conda config --add pkgs_dirs ${CONDA_DIR}/pkgs
+#conda config --add envs_dirs ${CONDA_DIR}/envs
 
-echo "  Conda pkgs: ${CONDA_DIR}/pkgs"
-echo "  Conda envs: ${CONDA_DIR}/envs"
+#echo "  Conda pkgs: ${CONDA_DIR}/pkgs"
+#echo "  Conda envs: ${CONDA_DIR}/envs"
 
 # Step 2: Create catalyst environment
-echo ""
-echo "[2/7] Creating catalyst conda environment..."
-if conda env list | grep -q "^catalyst "; then
-    echo "  Environment 'catalyst' already exists, skipping creation"
-else
-    conda create -n catalyst python=3.11 -y
-fi
+#echo ""
+#echo "[2/7] Creating catalyst conda environment..."
+#if conda env list | grep -q "^catalyst "; then
+    #echo "  Environment 'catalyst' already exists, skipping creation"
+#else
+    #conda create -n catalyst python=3.11 -y
+#fi
 
 # Activate
-source $(conda info --base)/etc/profile.d/conda.sh
-conda activate catalyst
+#source $(conda info --base)/etc/profile.d/conda.sh
+#conda activate catalyst
 
 # Step 3: Install Redis server
 echo ""
@@ -60,7 +60,7 @@ conda install -c conda-forge redis-server -y
 echo ""
 echo "[4/7] Installing Python dependencies..."
 pip install --quiet redis pyyaml numpy ase
-pip install --quiet academy-agents
+pip install --quiet academy-py
 pip install --quiet globus-compute-sdk
 
 # Step 5: Install ML potentials (PyTorch + MACE + CHGNet)
