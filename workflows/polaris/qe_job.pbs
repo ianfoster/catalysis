@@ -1,0 +1,81 @@
+#!/bin/bash
+#PBS -N catalyst_qe
+#PBS -l select=1:ncpus=64:ngpus=4
+#PBS -l walltime=01:00:00
+#PBS -l filesystems=home:eagle:grand
+#PBS -q debug
+#PBS -A <YOUR_ALLOCATION>
+#PBS -j oe
+#PBS -o qe_job.log
+
+# Quantum ESPRESSO DFT job for Catalyst on Polaris
+#
+# Usage:
+#   qsub -v INPUT_FILE=/path/to/input.pwi,OUTPUT_DIR=/path/to/output qe_job.pbs
+#
+# Or submit programmatically via Globus Compute function
+
+set -e
+
+echo "=========================================="
+echo "Quantum ESPRESSO Job on Polaris"
+echo "Start time: $(date)"
+echo "Node: $(hostname)"
+echo "=========================================="
+
+# Load modules
+module use /soft/modulefiles
+module load conda
+module load cudatoolkit-standalone/12.4.1
+module load quantum-espresso/7.3
+
+# Environment
+export OMP_NUM_THREADS=1
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+
+# Paths
+WORK_DIR=${PBS_O_WORKDIR:-$(pwd)}
+INPUT_FILE=${INPUT_FILE:-"${WORK_DIR}/input.pwi"}
+OUTPUT_DIR=${OUTPUT_DIR:-"${WORK_DIR}/output"}
+PSEUDO_DIR=${PSEUDO_DIR:-"/eagle/projects/catalyst/pseudopotentials"}
+
+# Create output directory
+mkdir -p "${OUTPUT_DIR}"
+cd "${OUTPUT_DIR}"
+
+echo "Input file: ${INPUT_FILE}"
+echo "Output dir: ${OUTPUT_DIR}"
+echo "Pseudo dir: ${PSEUDO_DIR}"
+
+# Copy input to working directory
+cp "${INPUT_FILE}" ./input.pwi
+
+# Determine parallelization
+NNODES=$(cat $PBS_NODEFILE | wc -l)
+NRANKS=$((NNODES * 4))  # 4 GPUs per node
+NRANKS_PER_NODE=4
+
+echo "Nodes: ${NNODES}, Total MPI ranks: ${NRANKS}"
+
+# Run pw.x with GPU acceleration
+mpiexec -n ${NRANKS} \
+    --ppn ${NRANKS_PER_NODE} \
+    --cpu-bind depth \
+    --depth 16 \
+    pw.x -input input.pwi > pw.out 2>&1
+
+# Check exit status
+if [ $? -eq 0 ]; then
+    echo "QE calculation completed successfully"
+
+    # Extract key results
+    grep "!" pw.out | tail -1 > energy.txt
+    grep "convergence has been achieved" pw.out && echo "SCF converged"
+else
+    echo "QE calculation FAILED"
+    exit 1
+fi
+
+echo "=========================================="
+echo "End time: $(date)"
+echo "=========================================="

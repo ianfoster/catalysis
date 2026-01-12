@@ -1,0 +1,117 @@
+#!/bin/bash
+#PBS -N catalyst_agents
+#PBS -l select=1:ncpus=64:ngpus=4
+#PBS -l walltime=01:00:00
+#PBS -l filesystems=home:eagle:grand
+#PBS -q debug
+#PBS -A <YOUR_ALLOCATION>
+#PBS -j oe
+#PBS -o polaris_agents.log
+
+# Run Catalyst Academy agents on Polaris
+#
+# This script launches:
+#   - QEAgent (Quantum ESPRESSO DFT)
+#   - GPAWAgent (GPAW DFT)
+#   - MACEAgent, CHGNetAgent (ML potentials)
+#   - ShepherdAgent(s) (candidate evaluation)
+#
+# Prerequisites:
+#   - Set ARGONNE_ACCESS_TOKEN in your environment or ~/.bashrc
+#   - Redis server running (for exchange with local GeneratorAgent)
+#
+# Usage:
+#   qsub -v REDIS_HOST=<redis-server> run_agents.pbs
+#
+# Or for local-only testing:
+#   qsub run_agents.pbs
+
+set -e
+
+echo "=========================================="
+echo "Catalyst Academy Agents on Polaris"
+echo "Start time: $(date)"
+echo "Node: $(hostname)"
+echo "Job ID: ${PBS_JOBID}"
+echo "=========================================="
+
+# Load modules
+module use /soft/modulefiles
+module load conda
+conda activate catalyst
+
+# CUDA for ML potentials on A100s
+module load cudatoolkit-standalone/12.4.1
+
+# Quantum ESPRESSO
+module load quantum-espresso/7.3
+
+# Environment
+export OMP_NUM_THREADS=1
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+
+# DFT data paths
+export PSEUDO_DIR="${PSEUDO_DIR:-/eagle/projects/catalyst/pseudopotentials}"
+export GPAW_SETUP_PATH="${GPAW_SETUP_PATH:-/eagle/projects/catalyst/gpaw-setups}"
+
+# Scratch space
+export TMPDIR=/local/scratch
+mkdir -p $TMPDIR
+
+# Argonne LLM inference token (should be set in environment or .bashrc)
+if [ -z "$ARGONNE_ACCESS_TOKEN" ]; then
+    echo "WARNING: ARGONNE_ACCESS_TOKEN not set"
+    echo "LLM calls will fail. Get token from:"
+    echo "  python scripts/inference_auth_token.py"
+fi
+
+# Change to project directory
+cd ${PBS_O_WORKDIR:-/home/$USER/catalyst}
+
+echo ""
+echo "Environment:"
+echo "  PSEUDO_DIR: ${PSEUDO_DIR}"
+echo "  GPAW_SETUP_PATH: ${GPAW_SETUP_PATH}"
+echo "  CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES}"
+echo "  TMPDIR: ${TMPDIR}"
+echo ""
+
+# Check QE availability
+echo "Checking DFT codes..."
+which pw.x && echo "  QE: OK" || echo "  QE: NOT FOUND"
+python -c "import gpaw; print(f'  GPAW: {gpaw.__version__}')" 2>/dev/null || echo "  GPAW: NOT FOUND"
+echo ""
+
+# Redis configuration
+REDIS_HOST="${REDIS_HOST:-}"
+REDIS_PORT="${REDIS_PORT:-6379}"
+
+# Build command
+AGENTS_CMD="python scripts/run_polaris_agents.py"
+AGENTS_CMD+=" --agents qe gpaw mace chgnet cantera stability surrogate"
+AGENTS_CMD+=" --num-shepherds 2"
+AGENTS_CMD+=" --budget 200"
+AGENTS_CMD+=" --device cuda"
+AGENTS_CMD+=" --llm-url https://inference-api.alcf.anl.gov/resource_server/sophia/vllm/v1"
+AGENTS_CMD+=" --llm-model meta-llama/Meta-Llama-3.1-70B-Instruct"
+
+if [ -n "$REDIS_HOST" ]; then
+    AGENTS_CMD+=" --redis-host ${REDIS_HOST} --redis-port ${REDIS_PORT}"
+    echo "Using Redis exchange: ${REDIS_HOST}:${REDIS_PORT}"
+else
+    echo "WARNING: No REDIS_HOST specified"
+    echo "Running in local exchange mode (GeneratorAgent must be on this node)"
+fi
+
+echo ""
+echo "Running: ${AGENTS_CMD}"
+echo "=========================================="
+
+# Run agents
+${AGENTS_CMD}
+
+echo ""
+echo "=========================================="
+echo "Agents stopped"
+echo "End time: $(date)"
+echo "=========================================="

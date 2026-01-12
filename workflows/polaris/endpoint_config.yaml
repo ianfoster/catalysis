@@ -1,0 +1,76 @@
+# Globus Compute Endpoint Configuration for Polaris
+#
+# To deploy this endpoint:
+# 1. SSH to Polaris: ssh <username>@polaris.alcf.anl.gov
+# 2. Create/activate conda environment with globus-compute-endpoint
+# 3. Run: globus-compute-endpoint configure polaris-catalyst
+# 4. Copy this config to ~/.globus_compute/polaris-catalyst/config.yaml
+# 5. Start: globus-compute-endpoint start polaris-catalyst
+# 6. Get endpoint ID and update config.yaml
+
+display_name: Polaris Catalyst DFT Endpoint
+
+engine:
+  type: HighThroughputEngine
+
+  # Provider for Polaris PBS scheduler
+  provider:
+    type: PBSProProvider
+
+    # Polaris queue settings
+    queue: debug  # Use 'prod' for production runs
+    account: <YOUR_ALLOCATION>  # Replace with your ALCF allocation
+
+    # Resource request per block (1 node = 4 A100 GPUs)
+    select_options: "ngpus=4"
+    nodes_per_block: 1
+
+    # Job timing
+    walltime: "01:00:00"  # 1 hour for debug queue
+
+    # Scaling
+    init_blocks: 0       # Start with no blocks
+    min_blocks: 0        # Scale down to 0 when idle
+    max_blocks: 2        # Max 2 nodes for debug testing
+
+    # Polaris-specific scheduler options
+    scheduler_options: |
+      #PBS -l filesystems=home:eagle:grand
+      #PBS -l place=scatter
+
+    # Module loads and environment setup
+    worker_init: |
+      module use /soft/modulefiles
+      module load conda
+      conda activate catalyst
+
+      # CUDA setup for A100s
+      module load cudatoolkit-standalone/12.4.1
+
+      # Quantum ESPRESSO (if using ALCF builds)
+      module load quantum-espresso/7.3
+
+      # Set scratch directory
+      export TMPDIR=/local/scratch
+
+      # GPU visibility
+      export CUDA_VISIBLE_DEVICES=0,1,2,3
+
+  # Executor settings
+  max_workers_per_node: 4  # One worker per GPU
+
+  # Address for worker communication
+  address:
+    type: address_by_interface
+    ifname: bond0
+
+# Heartbeat and idle settings
+heartbeat_period: 30
+idle_heartbeats_soft: 5
+idle_heartbeats_hard: 10
+
+# Working directory on Polaris
+working_dir: /eagle/projects/<YOUR_PROJECT>/catalyst_workdir
+
+# Log settings
+log_level: INFO

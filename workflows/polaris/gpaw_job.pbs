@@ -1,0 +1,72 @@
+#!/bin/bash
+#PBS -N catalyst_gpaw
+#PBS -l select=1:ncpus=64:ngpus=4
+#PBS -l walltime=01:00:00
+#PBS -l filesystems=home:eagle:grand
+#PBS -q debug
+#PBS -A <YOUR_ALLOCATION>
+#PBS -j oe
+#PBS -o gpaw_job.log
+
+# GPAW DFT job for Catalyst on Polaris
+#
+# Usage:
+#   qsub -v SCRIPT=/path/to/calc.py,OUTPUT_DIR=/path/to/output gpaw_job.pbs
+
+set -e
+
+echo "=========================================="
+echo "GPAW Job on Polaris"
+echo "Start time: $(date)"
+echo "Node: $(hostname)"
+echo "=========================================="
+
+# Load modules
+module use /soft/modulefiles
+module load conda
+conda activate catalyst  # Should have GPAW installed
+
+module load cudatoolkit-standalone/12.4.1
+
+# Environment
+export OMP_NUM_THREADS=1
+export GPAW_SETUP_PATH="/eagle/projects/catalyst/gpaw-setups"
+
+# Paths
+WORK_DIR=${PBS_O_WORKDIR:-$(pwd)}
+SCRIPT=${SCRIPT:-"${WORK_DIR}/calc.py"}
+OUTPUT_DIR=${OUTPUT_DIR:-"${WORK_DIR}/output"}
+
+mkdir -p "${OUTPUT_DIR}"
+cd "${OUTPUT_DIR}"
+
+echo "Script: ${SCRIPT}"
+echo "Output dir: ${OUTPUT_DIR}"
+
+# Copy script to working directory
+cp "${SCRIPT}" ./calc.py
+
+# Determine parallelization
+NNODES=$(cat $PBS_NODEFILE | wc -l)
+NRANKS=$((NNODES * 64))  # Use all CPU cores for GPAW
+NRANKS_PER_NODE=64
+
+echo "Nodes: ${NNODES}, Total MPI ranks: ${NRANKS}"
+
+# Run GPAW (CPU-based, highly parallel)
+mpiexec -n ${NRANKS} \
+    --ppn ${NRANKS_PER_NODE} \
+    --cpu-bind core \
+    gpaw python calc.py > gpaw.out 2>&1
+
+# Check exit status
+if [ $? -eq 0 ]; then
+    echo "GPAW calculation completed successfully"
+else
+    echo "GPAW calculation FAILED"
+    exit 1
+fi
+
+echo "=========================================="
+echo "End time: $(date)"
+echo "=========================================="

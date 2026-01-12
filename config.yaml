@@ -56,8 +56,11 @@ shepherd:
       capabilities: ["mace", "chgnet", "m3gnet", "cantera", "surrogate", "stability"]
       priority: 1  # Higher = preferred
     polaris:
-      id: null  # Set after creating endpoint on Polaris
-      capabilities: ["mace", "chgnet", "cantera", "qe", "gpaw"]
+      # Set this after running: python workflows/polaris/setup_endpoint.py
+      # Then: qsub workflows/polaris/start_gc_endpoint.pbs
+      # Get ID with: globus-compute-endpoint list
+      id: null  # e.g., "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+      capabilities: ["qe", "gpaw"]
       priority: 2  # Use for heavy DFT jobs
 
   timeouts:

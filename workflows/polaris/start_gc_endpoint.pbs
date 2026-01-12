@@ -1,0 +1,75 @@
+#!/bin/bash
+#PBS -N catalyst_gc_endpoint
+#PBS -l select=1:ncpus=64:ngpus=4
+#PBS -l walltime=02:00:00
+#PBS -l filesystems=home:eagle:grand
+#PBS -q debug
+#PBS -A <YOUR_ALLOCATION>
+#PBS -j oe
+#PBS -o gc_endpoint.log
+
+# Start Globus Compute Endpoint for Catalyst DFT tasks on Polaris
+#
+# This job starts a GC endpoint that can receive and execute DFT tasks.
+# The endpoint runs for the duration of the PBS job allocation.
+#
+# Usage:
+#   qsub -v ENDPOINT_NAME=polaris-catalyst start_gc_endpoint.pbs
+#
+# After starting, update config.yaml with the endpoint ID shown in the output.
+
+set -e
+
+echo "=========================================="
+echo "Globus Compute Endpoint on Polaris"
+echo "Start time: $(date)"
+echo "Node: $(hostname)"
+echo "Job ID: ${PBS_JOBID}"
+echo "=========================================="
+
+# Load modules
+module use /soft/modulefiles
+module load conda
+conda activate catalyst
+
+module load cudatoolkit-standalone/12.4.1
+module load quantum-espresso/7.3
+
+# Environment for DFT codes
+export OMP_NUM_THREADS=1
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+export PSEUDO_DIR="${PSEUDO_DIR:-/eagle/projects/catalyst/pseudopotentials}"
+export GPAW_SETUP_PATH="${GPAW_SETUP_PATH:-/eagle/projects/catalyst/gpaw-setups}"
+
+# Scratch space
+export TMPDIR=/local/scratch
+mkdir -p $TMPDIR
+
+# Endpoint configuration
+ENDPOINT_NAME=${ENDPOINT_NAME:-"polaris-catalyst"}
+
+echo "Starting Globus Compute Endpoint: ${ENDPOINT_NAME}"
+echo "PSEUDO_DIR: ${PSEUDO_DIR}"
+echo "GPAW_SETUP_PATH: ${GPAW_SETUP_PATH}"
+
+# Check if endpoint is configured
+if [ ! -d "${HOME}/.globus_compute/${ENDPOINT_NAME}" ]; then
+    echo "ERROR: Endpoint not configured. Run setup_endpoint.py first."
+    exit 1
+fi
+
+# Start the endpoint (foreground mode to keep job alive)
+# The --interchange flag runs in the current PBS allocation
+globus-compute-endpoint start ${ENDPOINT_NAME}
+
+echo ""
+echo "=========================================="
+echo "Endpoint started. Check endpoint ID with:"
+echo "  globus-compute-endpoint list"
+echo ""
+echo "To stop: globus-compute-endpoint stop ${ENDPOINT_NAME}"
+echo "=========================================="
+
+# Keep the job running while endpoint processes tasks
+# The endpoint will run until the PBS walltime expires
+sleep infinity
