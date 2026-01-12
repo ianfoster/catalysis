@@ -1,6 +1,6 @@
 # Catalyst
 
-Agentic Catalysis Discovery - An autonomous system for catalyst material discovery using LLM-guided optimization and multi-method simulation agents.
+Agentic Catalysis Discovery - An autonomous system for catalyst material discovery using LLM-guided optimization and multi-method simulation agents, with options to run on Spark and Polaris.
 
 ## Overview
 
