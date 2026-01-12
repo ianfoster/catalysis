@@ -65,6 +65,11 @@ conda install -c conda-forge redis-server -y
 # Step 4: Install Python dependencies
 echo ""
 echo "[4/7] Installing Python dependencies..."
+
+# Redirect pip cache to Eagle to avoid home quota issues
+export PIP_CACHE_DIR="${CONDA_DIR}/pip-cache"
+mkdir -p ${PIP_CACHE_DIR}
+
 pip install --quiet redis pyyaml numpy ase
 pip install --quiet academy-py
 pip install --quiet globus-compute-sdk
