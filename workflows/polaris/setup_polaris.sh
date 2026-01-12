@@ -32,7 +32,12 @@ mkdir -p ${CONDA_DIR}/envs
 
 # Put .condarc on Eagle to avoid home quota issues
 export CONDARC="${CONDA_DIR}/.condarc"
-touch ${CONDARC}
+echo "Configured CONDARC as $CONDARC"
+
+mkdir -p ${CONDA_DIR}
+rm -f ~/.condarc  # Remove the file if it exists (might fail, that's ok)
+ln -sf ${CONDA_DIR}/.condarc ~/.condarc
+touch ${CONDA_DIR}/.condarc
 
 module load conda
 

@@ -4,7 +4,7 @@
 #PBS -l walltime=01:00:00
 #PBS -l filesystems=home:eagle:grand
 #PBS -q debug
-#PBS -A <YOUR_ALLOCATION>
+#PBS -A AuroraGPT
 #PBS -j oe
 #PBS -o polaris_agents.log
 
