@@ -26,30 +26,33 @@ echo "Conda dir: ${CONDA_DIR}"
 echo ""
 
 # Step 1: Configure conda to use Eagle (avoid home quota issues)
-#echo "[1/7] Configuring conda to use Eagle filesystem..."
-#mkdir -p ${CONDA_DIR}/pkgs
-#mkdir -p ${CONDA_DIR}/envs
+echo "[1/7] Configuring conda to use Eagle filesystem..."
+mkdir -p ${CONDA_DIR}/pkgs
+mkdir -p ${CONDA_DIR}/envs
 
-#module load conda
+module load conda
 
-#conda config --add pkgs_dirs ${CONDA_DIR}/pkgs
-#conda config --add envs_dirs ${CONDA_DIR}/envs
+# Properly initialize conda for this shell
+eval "$(conda shell.bash hook)"
 
-#echo "  Conda pkgs: ${CONDA_DIR}/pkgs"
-#echo "  Conda envs: ${CONDA_DIR}/envs"
+conda config --add pkgs_dirs ${CONDA_DIR}/pkgs
+conda config --add envs_dirs ${CONDA_DIR}/envs
+
+echo "  Conda pkgs: ${CONDA_DIR}/pkgs"
+echo "  Conda envs: ${CONDA_DIR}/envs"
 
 # Step 2: Create catalyst environment
-#echo ""
-#echo "[2/7] Creating catalyst conda environment..."
-#if conda env list | grep -q "^catalyst "; then
-    #echo "  Environment 'catalyst' already exists, skipping creation"
-#else
-    #conda create -n catalyst python=3.11 -y
-#fi
+echo ""
+echo "[2/7] Creating catalyst conda environment..."
+if conda env list | grep -q "^catalyst "; then
+    echo "  Environment 'catalyst' already exists, skipping creation"
+else
+    conda create -n catalyst python=3.11 -y
+fi
 
 # Activate
-#source $(conda info --base)/etc/profile.d/conda.sh
-#conda activate catalyst
+eval "$(conda shell.bash hook)"
+conda activate catalyst
 
 # Step 3: Install Redis server
 echo ""
