@@ -102,7 +102,7 @@ cat > ${CATALYST_DIR}/activate.sh << 'ACTIVATE'
 
 module load conda
 module load cudatoolkit-standalone/12.4.1
-module load quantum-espresso/7.3
+export PATH=/soft/applications/quantum_espresso/7.5-nvhpc24.11-libxc700/bin:$PATH
 
 conda activate catalyst
 
