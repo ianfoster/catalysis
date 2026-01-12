@@ -32,6 +32,9 @@ mkdir -p ${CONDA_DIR}/envs
 
 module load conda
 
+# Properly initialize conda for this shell
+eval "$(conda shell.bash hook)"
+
 conda config --add pkgs_dirs ${CONDA_DIR}/pkgs
 conda config --add envs_dirs ${CONDA_DIR}/envs
 
@@ -48,7 +51,7 @@ else
 fi
 
 # Activate
-source $(conda info --base)/etc/profile.d/conda.sh
+eval "$(conda shell.bash hook)"
 conda activate catalyst
 
 # Step 3: Install Redis server
