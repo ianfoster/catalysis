@@ -71,7 +71,6 @@ conda install -c conda-forge redis-server -y
 echo ""
 echo "[4/7] Installing Python dependencies..."
 
-
 # Redirect pip cache to Eagle to avoid home quota issues
 export PIP_CACHE_DIR="${CONDA_DIR}/pip-cache"
 mkdir -p ${PIP_CACHE_DIR}
