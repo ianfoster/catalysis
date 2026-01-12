@@ -30,10 +30,14 @@ echo "[1/7] Configuring conda to use Eagle filesystem..."
 mkdir -p ${CONDA_DIR}/pkgs
 mkdir -p ${CONDA_DIR}/envs
 
+# Put .condarc on Eagle to avoid home quota issues
+export CONDARC="${CONDA_DIR}/.condarc"
+touch ${CONDARC}
+
 module load conda
 
-# Properly initialize conda for this shell
-eval "$(conda shell.bash hook)"
+# Source conda.sh directly (more reliable than shell hook)
+source /soft/applications/conda/2025-09-25/mconda3/etc/profile.d/conda.sh
 
 conda config --add pkgs_dirs ${CONDA_DIR}/pkgs
 conda config --add envs_dirs ${CONDA_DIR}/envs
@@ -51,7 +55,6 @@ else
 fi
 
 # Activate
-eval "$(conda shell.bash hook)"
 conda activate catalyst
 
 # Step 3: Install Redis server
