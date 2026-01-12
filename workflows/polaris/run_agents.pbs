@@ -43,8 +43,8 @@ conda activate catalyst
 # CUDA for ML potentials on A100s
 module load cudatoolkit-standalone/12.4.1
 
-# Quantum ESPRESSO
-module load quantum-espresso/7.3
+# Quantum ESPRESSO (prebuilt on Polaris)
+export PATH=/soft/applications/quantum_espresso/7.5-nvhpc24.11-libxc700/bin:$PATH
 
 # Environment
 export OMP_NUM_THREADS=1
